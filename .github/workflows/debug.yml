@@ -16,14 +16,66 @@ jobs:
           chmod +x /tmp/unikraft
           echo "/tmp" >> $GITHUB_PATH
 
-      - name: Login
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Login to Unikraft
         env:
           UKC_TOKEN: ${{ secrets.UKC_TOKEN }}
         run: |
           echo "${UKC_TOKEN}" > /tmp/token.txt
           unikraft login --token /tmp/token.txt --organization xiaojieyu
 
-      - name: Get Logs of test-myvless
+      - name: Clone and build vless-ws-go
         run: |
-          echo "=== Logs of 433ba2de-52c3-4d71-abbe-d149f6a51278 ==="
-          unikraft instance logs 433ba2de-52c3-4d71-abbe-d149f6a51278 || true
+          git clone https://github.com/liseipi/vless-ws-go.git /tmp/vless-src
+          mkdir -p /tmp/vless-pkg
+          cd /tmp/vless-src
+          go mod tidy
+          CGO_ENABLED=0 go build -ldflags="-s -w" -o /tmp/vless-pkg/vless-server .
+          cd /tmp/vless-pkg
+          
+          cat << 'EOF' > Dockerfile
+          FROM scratch
+          COPY vless-server /vless-server
+          ENTRYPOINT ["/vless-server"]
+          EOF
+
+          cat << 'EOF' > Kraftfile
+          spec: v0.7
+          name: vless
+          cmd: ["/vless-server"]
+          rootfs: ./Dockerfile
+          targets:
+            - architecture: x86_64
+              platform: kraftcloud
+          EOF
+
+          echo "=== Building Unikraft unikernel image ==="
+          unikraft image build . --output /tmp/vless.tar
+
+          echo "=== Copying image to Unikraft Cloud registry ==="
+          unikraft image copy /tmp/vless.tar unikraft.io/xiaojieyu/vless:latest
+
+      - name: Test deploy to fra
+        run: |
+          echo "=== Testing instance launch in fra ==="
+          unikraft instance delete test-vless --metro fra 2>/dev/null || true
+          unikraft run \
+            --name test-vless \
+            --metro fra \
+            --image oci://unikraft.io/xiaojieyu/vless:latest \
+            --memory 256MiB \
+            --vcpus 1 \
+            -e PORT="8080" \
+            -e WS_PATH="/" \
+            -e UUID="694949f5-54c3-4113-b3c9-2d2518f770f4" \
+            -p 443:8080/http+tls \
+            -p 80:8080/http \
+            -o json || true
+          
+          sleep 6
+          unikraft instance get test-vless -o json || true
+          unikraft instance logs test-vless || true
