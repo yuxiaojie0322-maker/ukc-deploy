@@ -103,15 +103,7 @@ jobs:
           COUNT=0
           STATUS="unknown"
           while [ $COUNT -lt $TIMEOUT ]; do
-            STATUS=$(unikraft instance get "${INSTANCE_NAME}" --metro "${METRO}" -o json 2>/dev/null | python3 -c "import sys,json
-try:
-    d = json.load(sys.stdin)
-    if isinstance(d, list) and d: d = d[0]
-    elif isinstance(d, dict):
-        d = d.get('data', {}).get('instances', [d])[0] if 'data' in d else d.get('instances', [d])[0]
-    print(d.get('state', 'unknown'))
-except Exception:
-    print('unknown')" 2>/dev/null || echo "error")
+            STATUS=$(unikraft instance get "${INSTANCE_NAME}" --metro "${METRO}" -o json 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); d=d[0] if isinstance(d,list) else (d.get('data',{}).get('instances',[d])[0] if 'data' in d else d.get('instances',[d])[0]); print(d.get('state','unknown'))" 2>/dev/null || echo "error")
             echo "[$COUNT/$TIMEOUT] 状态: ${STATUS}"
             if [ "${STATUS}" = "running" ] || [ "${STATUS}" = "standby" ]; then
               break
@@ -125,15 +117,7 @@ except Exception:
           fi
           
           # 获取 FQDN 域名
-          FQDN=$(unikraft instance get "${INSTANCE_NAME}" --metro "${METRO}" -o json 2>/dev/null | python3 -c "import sys,json
-try:
-    d = json.load(sys.stdin)
-    if isinstance(d, list) and d: d = d[0]
-    elif isinstance(d, dict):
-        d = d.get('data', {}).get('instances', [d])[0] if 'data' in d else d.get('instances', [d])[0]
-    print(d.get('fqdn', d.get('domain', 'unknown')))
-except Exception:
-    print('unknown')" 2>/dev/null || echo "unknown")
+          FQDN=$(unikraft instance get "${INSTANCE_NAME}" --metro "${METRO}" -o json 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); d=d[0] if isinstance(d,list) else (d.get('data',{}).get('instances',[d])[0] if 'data' in d else d.get('instances',[d])[0]); print(d.get('fqdn',d.get('domain','unknown')))" 2>/dev/null || echo "unknown")
           echo "FQDN: ${FQDN}"
           
           # 冒烟测试
