@@ -46,9 +46,25 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install unikraft CLI
-        uses: unikraft/setup-action@v1
-        with:
-          token: ${{ secrets.UKC_TOKEN }}
+        run: |
+          set -euo pipefail
+          curl -fsSL https://pkg.unikraft.com/endpoints/cli/content/stable.txt | tr -d '\r\n' > /tmp/ukc_version
+          VERSION=$(cat /tmp/ukc_version)
+          echo "Installing unikraft CLI v${VERSION}"
+          curl -fsSL "https://github.com/unikraft-cloud/cli/releases/download/v${VERSION}/unikraft-cli_${VERSION}_linux_amd64.tar.gz" -o /tmp/unikraft.tar.gz
+          tar -xzf /tmp/unikraft.tar.gz -C /tmp
+          chmod +x /tmp/unikraft
+          echo "/tmp" >> $GITHUB_PATH
+
+      - name: Login to Unikraft
+        env:
+          UKC_TOKEN: ${{ secrets.UKC_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Write token to temp file (CLI expects file path)
+          echo "${UKC_TOKEN}" > /tmp/ukc_token.txt
+          # Login with explicit organization
+          unikraft login --token /tmp/ukc_token.txt --organization "${UKC_ORG}"
 
       - name: Deploy to ${{ matrix.metro }}
         id: deploy
@@ -154,21 +170,31 @@ jobs:
           fi
 
   cleanup:
-    if: github.event.inputs.action == 'cleanup' || github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'cleanup'
+    if: github.event.inputs.action == 'cleanup'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install unikraft CLI
-        uses: unikraft/setup-action@v1
-        with:
-          token: ${{ secrets.UKC_TOKEN }}
+        run: |
+          set -euo pipefail
+          curl -fsSL https://pkg.unikraft.com/endpoints/cli/content/stable.txt | tr -d '\r\n' > /tmp/ukc_version
+          VERSION=$(cat /tmp/ukc_version)
+          curl -fsSL "https://github.com/unikraft-cloud/cli/releases/download/v${VERSION}/unikraft-cli_${VERSION}_linux_amd64.tar.gz" -o /tmp/unikraft.tar.gz
+          tar -xzf /tmp/unikraft.tar.gz -C /tmp
+          chmod +x /tmp/unikraft
+          echo "/tmp" >> $GITHUB_PATH
 
-      - name: Cleanup instances
-        id: cleanup
+      - name: Login to Unikraft
         env:
           UKC_TOKEN: ${{ secrets.UKC_TOKEN }}
+        run: |
+          echo "${UKC_TOKEN}" > /tmp/ukc_token.txt
+          unikraft login --token /tmp/ukc_token.txt --organization "${UKC_ORG}"
+
+      - name: Cleanup instances
+        env:
           KEEP_METROS: "fra,was,dal,sin,sfo"
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
@@ -176,10 +202,8 @@ jobs:
           echo "==> 清理不在保留列表中的实例..."
           echo "保留 metro: ${KEEP_METROS}"
           
-          # 获取所有实例
           INSTANCES=$(unikraft instance list -o json 2>/dev/null || echo "[]")
           
-          # 解析并删除
           echo "${INSTANCES}" | python3 -c "
           import sys, json, subprocess
           
@@ -201,3 +225,9 @@ jobs:
           "
           
           echo "清理完成"
+          if [ -n "${TG_BOT_TOKEN}" ] && [ -n "${TG_CHAT_ID}" ]; then
+            curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+              -H "Content-Type: application/json" \
+              -d "{\"chat_id\":\"${TG_CHAT_ID}\",\"text\":\"🧹 UKC 清理完成\\n保留: ${KEEP_METROS}\",\"parse_mode\":\"Markdown\"}" \
+              || true
+          fi
