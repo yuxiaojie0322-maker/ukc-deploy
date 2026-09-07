@@ -27,10 +27,13 @@ jobs:
         run: |
           mkdir -p /tmp/myvless
           cat << 'EOF' > /tmp/myvless/Kraftfile
-          spec: v0.6
+          spec: v0.7
           name: myvless
-          rootfs: ./Dockerfile
           cmd: ["/server"]
+          rootfs: ./Dockerfile
+          targets:
+            - architecture: x86_64
+              platform: kraftcloud
           EOF
 
           cat << 'EOF' > /tmp/myvless/Dockerfile
