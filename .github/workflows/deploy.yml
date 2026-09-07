@@ -12,9 +12,9 @@ on:
         required: false
         default: 'lxy/xapp-go'
       memory:
-        description: '内存配额 (如 128Mi, 256Mi)'
+        description: '内存配额 (如 128MiB, 256MiB)'
         required: false
-        default: '256Mi'
+        default: '256MiB'
       action:
         description: '操作类型'
         required: false
