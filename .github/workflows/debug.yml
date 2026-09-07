@@ -37,35 +37,15 @@ jobs:
           # Patch config.go defaults
           sed -i 's|envStr("PORT", "8081")|envStr("PORT", "8080")|g' config.go
           sed -i 's|envStr("WS_PATH", "/api")|envStr("WS_PATH", "/")|g' config.go
-          sed -i 's|envStr("UUID", "")|envStr("UUID", "694949f5-54c3-4113-b3c9-2d2518f770f4")|g' config.go
+          sed -i 's|UUID:  envStr("UUID", "")|UUID:  envStr("UUID", "694949f5-54c3-4113-b3c9-2d2518f770f4")|g' config.go
           
           # Patch main.go to block directly on ListenAndServe
           python3 -c '
           with open("main.go", "r") as f:
               s = f.read()
-          old = """\tgo func() {\n\t\tprintBanner(cfg)\n\t\tif err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {\n\t\t\tlog.Error(\"listen error:\", err.Error())\n\t\t\tos.Exit(1)\n\t\t}\n\t}()\n\n\t// 优雅关闭\n\tsigCh := make(chan os.Signal, 1)\n\tsignal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)\n\tsig := <-sigCh\n\tlog.Info(fmt.Sprintf(\"%s ，shutting down\", sig.String()))\n\n\tshutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)\n\tdefer cancel()\n\tif err := httpServer.Shutdown(shutdownCtx); err != nil {\n\t\tlog.Warn(\"forced shutdown:\", err.Error())\n\t}"""
-          new = """\tprintBanner(cfg)\n\tif err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {\n\t\tlog.Error(\"listen error:\", err.Error())\n\t\tos.Exit(1)\n\t}"""
-          if old in s:
-              s = s.replace(old, new)
-              print("Replaced successfully!")
-          else:
-              print("Pattern not matched exactly, applying line replace")
-              lines = s.split("\n")
-              out = []
-              skip = False
-              for line in lines:
-                  if "go func() {" in line:
-                      out.append("\tprintBanner(cfg)")
-                      out.append("\tif err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {")
-                      out.append("\t\tlog.Error(\"listen error:\", err.Error())")
-                      out.append("\t\tos.Exit(1)")
-                      out.append("\t}")
-                      skip = True
-                  elif "shutdownCtx, cancel" in line:
-                      skip = False
-                  elif not skip and "sig := <-sigCh" not in line and "signal.Notify" not in line and "sigCh :=" not in line and "log.Info(fmt.Sprintf" not in line and "httpServer.Shutdown" not in line and "forced shutdown" not in line:
-                      out.append(line)
-              s = "\n".join(out)
+          idx = s.index("go func() {")
+          afterIdx = s.index("func clientIP(")
+          s = s[:idx] + "printBanner(cfg)\n\tif err := httpServer.ListenAndServe(); err != nil {\n\t\tlog.Error(\"listen error:\", err.Error())\n\t\tos.Exit(1)\n\t}\n}\n\n" + s[afterIdx:]
           with open("main.go", "w") as f:
               f.write(s)
           '
