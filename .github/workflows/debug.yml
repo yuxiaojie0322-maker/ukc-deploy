@@ -1,10 +1,10 @@
-name: test-build
+name: test-debug
 
 on:
   workflow_dispatch:
 
 jobs:
-  build:
+  debug:
     runs-on: ubuntu-latest
     steps:
       - name: Install unikraft CLI
@@ -23,15 +23,7 @@ jobs:
           echo "${UKC_TOKEN}" > /tmp/token.txt
           unikraft login --token /tmp/token.txt --organization xiaojieyu
 
-      - name: Create minimal test app
+      - name: Check copy help
         run: |
-          mkdir -p /tmp/myapp
-          cat << 'EOF' > /tmp/myapp/Dockerfile
-          FROM alpine:latest
-          CMD ["echo", "hello world"]
-          EOF
-
-      - name: Test unikraft image build
-        run: |
-          echo "=== Testing unikraft image build /tmp/myapp ==="
-          unikraft image build /tmp/myapp --output xiaojieyu/test-app:latest || true
+          echo "=== unikraft image copy --help ==="
+          unikraft image copy --help || true
