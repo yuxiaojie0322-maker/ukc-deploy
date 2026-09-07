@@ -23,20 +23,18 @@ jobs:
           echo "${UKC_TOKEN}" > /tmp/token.txt
           unikraft login --token /tmp/token.txt --organization xiaojieyu
 
-      - name: Test ghcr.io/eooce/ws:latest
+      - name: Test official tunnel
         run: |
-          echo "=== Testing ghcr.io/eooce/ws:latest ==="
+          echo "=== Testing official/utils/tunnel:1.0 ==="
           unikraft run \
-            --name test-ws \
+            --name test-tunnel \
             --metro fra \
-            --image ghcr.io/eooce/ws:latest \
+            --image official/utils/tunnel:1.0 \
             --memory 256MiB \
             --vcpus 1 \
-            -e UUID="694949f5-54c3-4113-b3c9-2d2518f770f4" \
-            -e PORT="8080" \
             -p 443:8080/http+tls \
-            -p 80:8080/http \
             -o json || true
           
           sleep 5
-          unikraft instance get test-ws || true
+          unikraft instance get test-tunnel || true
+          unikraft instance logs test-tunnel || true
