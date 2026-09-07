@@ -28,15 +28,52 @@ jobs:
           echo "${UKC_TOKEN}" > /tmp/token.txt
           unikraft login --token /tmp/token.txt --organization xiaojieyu
 
-      - name: Clone and build vless-ws-go
+      - name: Build tailored vless-ws-go
         run: |
           git clone https://github.com/liseipi/vless-ws-go.git /tmp/vless-src
           mkdir -p /tmp/vless-pkg
           cd /tmp/vless-src
+          
+          # Patch config.go defaults
+          sed -i 's|envStr("PORT", "8081")|envStr("PORT", "8080")|g' config.go
+          sed -i 's|envStr("WS_PATH", "/api")|envStr("WS_PATH", "/")|g' config.go
+          sed -i 's|envStr("UUID", "")|envStr("UUID", "694949f5-54c3-4113-b3c9-2d2518f770f4")|g' config.go
+          
+          # Patch main.go to block directly on ListenAndServe
+          python3 -c '
+          with open("main.go", "r") as f:
+              s = f.read()
+          old = """\tgo func() {\n\t\tprintBanner(cfg)\n\t\tif err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {\n\t\t\tlog.Error(\"listen error:\", err.Error())\n\t\t\tos.Exit(1)\n\t\t}\n\t}()\n\n\t// 优雅关闭\n\tsigCh := make(chan os.Signal, 1)\n\tsignal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)\n\tsig := <-sigCh\n\tlog.Info(fmt.Sprintf(\"%s ，shutting down\", sig.String()))\n\n\tshutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)\n\tdefer cancel()\n\tif err := httpServer.Shutdown(shutdownCtx); err != nil {\n\t\tlog.Warn(\"forced shutdown:\", err.Error())\n\t}"""
+          new = """\tprintBanner(cfg)\n\tif err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {\n\t\tlog.Error(\"listen error:\", err.Error())\n\t\tos.Exit(1)\n\t}"""
+          if old in s:
+              s = s.replace(old, new)
+              print("Replaced successfully!")
+          else:
+              print("Pattern not matched exactly, applying line replace")
+              lines = s.split("\n")
+              out = []
+              skip = False
+              for line in lines:
+                  if "go func() {" in line:
+                      out.append("\tprintBanner(cfg)")
+                      out.append("\tif err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {")
+                      out.append("\t\tlog.Error(\"listen error:\", err.Error())")
+                      out.append("\t\tos.Exit(1)")
+                      out.append("\t}")
+                      skip = True
+                  elif "shutdownCtx, cancel" in line:
+                      skip = False
+                  elif not skip and "sig := <-sigCh" not in line and "signal.Notify" not in line and "sigCh :=" not in line and "log.Info(fmt.Sprintf" not in line and "httpServer.Shutdown" not in line and "forced shutdown" not in line:
+                      out.append(line)
+              s = "\n".join(out)
+          with open("main.go", "w") as f:
+              f.write(s)
+          '
+          
           go mod tidy
           CGO_ENABLED=0 go build -ldflags="-s -w" -o /tmp/vless-pkg/vless-server .
-          cd /tmp/vless-pkg
           
+          cd /tmp/vless-pkg
           cat << 'EOF' > Dockerfile
           FROM scratch
           COPY vless-server /vless-server
@@ -59,23 +96,21 @@ jobs:
           echo "=== Copying image to Unikraft Cloud registry ==="
           unikraft image copy /tmp/vless.tar unikraft.io/xiaojieyu/vless:latest
 
-      - name: Test deploy to fra
+      - name: Test run in fra
         run: |
-          echo "=== Testing instance launch in fra ==="
-          unikraft instance delete test-vless --metro fra 2>/dev/null || true
+          echo "=== Testing deployment in fra ==="
+          unikraft instance delete vless-live --metro fra 2>/dev/null || true
           unikraft run \
-            --name test-vless \
+            --name vless-live \
             --metro fra \
             --image oci://unikraft.io/xiaojieyu/vless:latest \
             --memory 256MiB \
             --vcpus 1 \
-            -e PORT="8080" \
-            -e WS_PATH="/" \
-            -e UUID="694949f5-54c3-4113-b3c9-2d2518f770f4" \
             -p 443:8080/http+tls \
             -p 80:8080/http \
             -o json || true
           
           sleep 6
-          unikraft instance get test-vless -o json || true
-          unikraft instance logs test-vless || true
+          echo "=== Checking state after 6 seconds ==="
+          unikraft instance get vless-live -o json || true
+          unikraft instance logs vless-live || true
