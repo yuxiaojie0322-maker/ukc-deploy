@@ -15,6 +15,10 @@ on:
         description: '指定统一镜像（留空则按节点自动匹配专属镜像：fra-go, dal-js, sfo-java, was-java-obf, sin-py）'
         required: false
         default: ''
+      uuid:
+        description: 'VLESS 节点 UUID 密钥'
+        required: false
+        default: '694949f5-54c3-4113-b3c9-2d2518f770f4'
       action:
         description: '操作类型'
         required: false
@@ -96,6 +100,7 @@ jobs:
           METRO: ${{ matrix.metro }}
           CHOSEN_IMAGE: ${{ github.event.inputs.image || matrix.image }}
           MEMORY: ${{ github.event.inputs.memory || '256MiB' }}
+          NODE_UUID: ${{ github.event.inputs.uuid || '694949f5-54c3-4113-b3c9-2d2518f770f4' }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
@@ -106,6 +111,7 @@ jobs:
           echo "    实例名: ${INSTANCE_NAME}"
           echo "    镜像: ${FULL_IMAGE}"
           echo "    内存: ${MEMORY}"
+          echo "    UUID: ${NODE_UUID}"
           echo "    组织: ${UKC_ORG}"
           
           # 先清理可能存在的同名旧实例
@@ -119,6 +125,8 @@ jobs:
             --image "${FULL_IMAGE}" \
             --memory "${MEMORY}" \
             --vcpus 1 \
+            -e UUID="${NODE_UUID}" \
+            -e PORT="8080" \
             --scale-to-zero "policy=on,cooldown-time=3600000" \
             -p 443:8080/http+tls \
             -p 80:8080/http \
@@ -145,14 +153,18 @@ jobs:
           DEPLOY_STATUS="✅ ${STATUS} (HTTP ${HTTP_CODE})"
           echo "状态: ${DEPLOY_STATUS}"
           
+          VLESS_LINK="vless://${NODE_UUID}@${FQDN}:443?encryption=none&security=tls&sni=${FQDN}&type=ws&host=${FQDN}&path=%2F#UKC-${METRO}"
+          echo "VLESS: ${VLESS_LINK}"
+          
           # 输出结果
           echo "fqdn=${FQDN}" >> $GITHUB_OUTPUT
           echo "status=${DEPLOY_STATUS}" >> $GITHUB_OUTPUT
           echo "metro=${METRO}" >> $GITHUB_OUTPUT
+          echo "vless_link=${VLESS_LINK}" >> $GITHUB_OUTPUT
           
           # 发送 Telegram 通知
           if [ -n "${TG_BOT_TOKEN}" ] && [ -n "${TG_CHAT_ID}" ]; then
-            MESSAGE="🚀 ${METRO} 常驻部署完成\n\n实例: ${INSTANCE_NAME}\n镜像: ${CHOSEN_IMAGE}\nFQDN: https://${FQDN}\n状态: ${DEPLOY_STATUS}"
+            MESSAGE="🚀 ${METRO} 常驻部署完成\n\n实例: ${INSTANCE_NAME}\n镜像: ${CHOSEN_IMAGE}\nFQDN: https://${FQDN}\n状态: ${DEPLOY_STATUS}\n\n链接: \`${VLESS_LINK}\`"
             curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
               -H "Content-Type: application/json" \
               -d "{\"chat_id\":\"${TG_CHAT_ID}\",\"text\":\"${MESSAGE}\",\"parse_mode\":\"Markdown\"}" \
@@ -165,11 +177,13 @@ jobs:
           METRO="${{ steps.deploy.outputs.metro }}"
           FQDN="${{ steps.deploy.outputs.fqdn }}"
           STATUS="${{ steps.deploy.outputs.status }}"
+          VLESS="${{ steps.deploy.outputs.vless_link }}"
           
           echo "### 部署结果 (${METRO})" >> $GITHUB_STEP_SUMMARY
           echo "- **Metro**: ${METRO}" >> $GITHUB_STEP_SUMMARY
           echo "- **FQDN**: https://${FQDN}" >> $GITHUB_STEP_SUMMARY
           echo "- **状态**: ${STATUS}" >> $GITHUB_STEP_SUMMARY
+          echo "- **VLESS 链接**: \`${VLESS}\`" >> $GITHUB_STEP_SUMMARY
 
   cleanup:
     if: github.event.inputs.action == 'cleanup'
