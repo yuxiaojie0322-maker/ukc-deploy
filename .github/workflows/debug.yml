@@ -23,11 +23,7 @@ jobs:
           echo "${UKC_TOKEN}" > /tmp/token.txt
           unikraft login --token /tmp/token.txt --organization xiaojieyu
 
-      - name: Get Logs of xapp-fra
+      - name: Test tunnel image
         run: |
-          echo "=== unikraft instance logs xapp-fra ==="
-          unikraft instance logs xapp-fra || true
-          echo "=== unikraft image inspect lxy/xapp-go ==="
-          unikraft image inspect oci://unikraft.io/lxy/xapp-go || true
-          echo "=== unikraft image inspect official/utils/tunnel:1.0 ==="
-          unikraft image inspect official/utils/tunnel:1.0 || true
+          echo "=== testing official/utils/tunnel:1.0 ==="
+          unikraft run --rm --metro fra --memory 256MiB --image official/utils/tunnel:1.0 -- --help || true
