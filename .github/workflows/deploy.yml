@@ -8,13 +8,13 @@ on:
         required: false
         default: ''
       memory:
-        description: '每个实例内存配额 (如 256MiB, 512MiB, 1024MiB)'
+        description: '每个实例内存配额 (如 256MiB, 512MiB)'
         required: false
         default: '256MiB'
       image:
-        description: '指定统一镜像（留空则按节点自动匹配专属镜像：fra-go, dal-js, sfo-java, was-java-obf, sin-py）'
+        description: '镜像名称（默认专属独立镜像 xiaojieyu/vless:latest）'
         required: false
-        default: ''
+        default: 'xiaojieyu/vless:latest'
       uuid:
         description: 'VLESS 节点 UUID 密钥'
         required: false
@@ -28,7 +28,7 @@ on:
           - deploy
           - cleanup
   schedule:
-    - cron: '0 1 * * *'  # 每天北京时间 09:00
+    - cron: '0 1 * * *'  # 每天北京时间 09:00 自动健康保活与同步
 
 permissions:
   contents: read
@@ -44,17 +44,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - metro: fra
-            image: lxy/xapp-go
-          - metro: dal
-            image: lxy/xapp-js
-          - metro: sfo
-            image: lxy/xapp-java
-          - metro: was
-            image: lxy/xapp-java-obf
-          - metro: sin
-            image: lxy/xapp-py
+        metro: [fra, was, dal, sin, sfo]
     steps:
       - name: Filter Metro
         id: filter
@@ -98,73 +88,98 @@ jobs:
         env:
           UKC_TOKEN: ${{ secrets.UKC_TOKEN }}
           METRO: ${{ matrix.metro }}
-          CHOSEN_IMAGE: ${{ github.event.inputs.image || matrix.image }}
+          CHOSEN_IMAGE: ${{ github.event.inputs.image || 'xiaojieyu/vless:latest' }}
           MEMORY: ${{ github.event.inputs.memory || '256MiB' }}
           NODE_UUID: ${{ github.event.inputs.uuid || '694949f5-54c3-4113-b3c9-2d2518f770f4' }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
-          INSTANCE_NAME="xapp-${METRO}"
+          INSTANCE_NAME="ukc-${METRO}"
           FULL_IMAGE="${IMAGE_PREFIX}${CHOSEN_IMAGE}"
           
           echo "==> 部署到 ${METRO}..."
           echo "    实例名: ${INSTANCE_NAME}"
           echo "    镜像: ${FULL_IMAGE}"
           echo "    内存: ${MEMORY}"
-          echo "    UUID: ${NODE_UUID}"
-          echo "    组织: ${UKC_ORG}"
           
-          # 先清理可能存在的同名旧实例
-          echo "==> 检查并清理已有实例..."
-          unikraft instance delete "${INSTANCE_NAME}" --metro "${METRO}" 2>/dev/null || true
+          # 检查并清理旧同名实例
+          python3 -c "
+          import urllib.request, json
+          headers = {'Authorization': 'Bearer ${UKC_TOKEN}', 'Content-Type': 'application/json'}
+          try:
+              req = urllib.request.Request('https://api.${METRO}.unikraft.cloud/v1/instances', headers=headers)
+              with urllib.request.urlopen(req) as resp:
+                  data = json.loads(resp.read().decode('utf-8'))
+              for inst in data.get('data', {}).get('instances', []):
+                  if inst.get('name') == '${INSTANCE_NAME}':
+                      del_req = urllib.request.Request(f'https://api.${METRO}.unikraft.cloud/v1/instances/{inst[\"uuid\"]}', headers=headers, method='DELETE')
+                      urllib.request.urlopen(del_req)
+                      print(f'已删除旧实例: {inst[\"uuid\"]}')
+          except Exception as e:
+              print(f'旧实例检查提示: {e}')
+          "
           
-          echo "==> 创建常驻实例..."
-          RESULT=$(unikraft run \
+          sleep 2
+          
+          # 创建服务组并启动新实例
+          RUN_RES=$(unikraft run \
             --name "${INSTANCE_NAME}" \
             --metro "${METRO}" \
             --image "${FULL_IMAGE}" \
             --memory "${MEMORY}" \
             --vcpus 1 \
-            -e UUID="${NODE_UUID}" \
-            -e PORT="8080" \
             --scale-to-zero "policy=on,cooldown-time=3600000" \
             -p 443:8080/http+tls \
             -p 80:8080/http \
             -o json 2>&1) || true
           
-          echo "创建结果: ${RESULT}"
+          echo "创建结果: ${RUN_RES}"
           
-          # 获取 FQDN 域名
-          FQDN=$(unikraft instance get "${INSTANCE_NAME}" --metro "${METRO}" -o json 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); d=d[0] if isinstance(d,list) else (d.get('data',{}).get('instances',[d])[0] if 'data' in d else d.get('instances',[d])[0]); domains=d.get('service_group',{}).get('domains',[]); print(domains[0].get('fqdn') if domains and isinstance(domains[0],dict) else d.get('fqdn', d.get('domain', 'unknown')))" 2>/dev/null || echo "unknown")
+          sleep 5
+          
+          # 获取实例状态与域名
+          INFO_JSON=$(python3 -c "
+          import urllib.request, json
+          headers = {'Authorization': 'Bearer ${UKC_TOKEN}'}
+          try:
+              req = urllib.request.Request('https://api.${METRO}.unikraft.cloud/v1/instances', headers=headers)
+              with urllib.request.urlopen(req) as resp:
+                  data = json.loads(resp.read().decode('utf-8'))
+              for inst in data.get('data', {}).get('instances', []):
+                  if inst.get('name') == '${INSTANCE_NAME}':
+                      sg_uuid = inst.get('service_group', {}).get('uuid', '')
+                      sg_req = urllib.request.Request(f'https://api.${METRO}.unikraft.cloud/v1/services/{sg_uuid}', headers=headers)
+                      with urllib.request.urlopen(sg_req) as sg_resp:
+                          sg_data = json.loads(sg_resp.read().decode('utf-8'))
+                      fqdn = sg_data.get('data', {}).get('service_groups', [{}])[0].get('domains', [{}])[0].get('fqdn', '')
+                      print(json.dumps({'state': inst.get('state', 'unknown'), 'fqdn': fqdn}))
+                      break
+          except Exception as e:
+              print(json.dumps({'state': 'error', 'fqdn': '', 'err': str(e)}))
+          ")
+          
+          STATUS=$(echo "${INFO_JSON}" | jq -r '.state // "unknown"')
+          FQDN=$(echo "${INFO_JSON}" | jq -r '.fqdn // "unknown"')
+          
+          echo "状态: ${STATUS}"
           echo "FQDN: ${FQDN}"
-          
-          # 立即发送 HTTP 请求激活实例进入 running 状态
-          echo "==> 发送流量激活实例..."
-          curl -s -o /dev/null -m 10 "https://${FQDN}" 2>/dev/null || true
-          sleep 2
-          
-          # 验证状态
-          STATUS=$(unikraft instance get "${INSTANCE_NAME}" --metro "${METRO}" -o json 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); d=d[0] if isinstance(d,list) else (d.get('data',{}).get('instances',[d])[0] if 'data' in d else d.get('instances',[d])[0]); print(d.get('state','unknown'))" 2>/dev/null || echo "error")
-          echo "激活后状态: ${STATUS}"
           
           # 冒烟测试
           echo "==> 冒烟测试..."
-          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 15 "https://${FQDN}" 2>/dev/null || echo "000")
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 10 "https://${FQDN}/health" 2>/dev/null || echo "000")
           DEPLOY_STATUS="✅ ${STATUS} (HTTP ${HTTP_CODE})"
-          echo "状态: ${DEPLOY_STATUS}"
+          echo "检测结果: ${DEPLOY_STATUS}"
           
           VLESS_LINK="vless://${NODE_UUID}@${FQDN}:443?encryption=none&security=tls&sni=${FQDN}&type=ws&host=${FQDN}&path=%2F#UKC-${METRO}"
           echo "VLESS: ${VLESS_LINK}"
           
-          # 输出结果
           echo "fqdn=${FQDN}" >> $GITHUB_OUTPUT
           echo "status=${DEPLOY_STATUS}" >> $GITHUB_OUTPUT
           echo "metro=${METRO}" >> $GITHUB_OUTPUT
           echo "vless_link=${VLESS_LINK}" >> $GITHUB_OUTPUT
           
-          # 发送 Telegram 通知
           if [ -n "${TG_BOT_TOKEN}" ] && [ -n "${TG_CHAT_ID}" ]; then
-            MESSAGE="🚀 ${METRO} 常驻部署完成\n\n实例: ${INSTANCE_NAME}\n镜像: ${CHOSEN_IMAGE}\nFQDN: https://${FQDN}\n状态: ${DEPLOY_STATUS}\n\n链接: \`${VLESS_LINK}\`"
+            MESSAGE="🚀 UKC-${METRO} 部署完成\n\n域名: https://${FQDN}\n状态: ${DEPLOY_STATUS}\n\n链接: \`${VLESS_LINK}\`"
             curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
               -H "Content-Type: application/json" \
               -d "{\"chat_id\":\"${TG_CHAT_ID}\",\"text\":\"${MESSAGE}\",\"parse_mode\":\"Markdown\"}" \
@@ -189,46 +204,23 @@ jobs:
     if: github.event.inputs.action == 'cleanup'
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install unikraft CLI
-        run: |
-          set -euo pipefail
-          VERSION=$(curl -fsSL https://pkg.unikraft.com/endpoints/cli/content/stable.txt | tr -d '\r\n')
-          VERSION="${VERSION#v}"
-          echo "Installing unikraft CLI v${VERSION}"
-          curl -fsSL "https://github.com/unikraft-cloud/cli/releases/download/v${VERSION}/unikraft-cli_${VERSION}_linux_amd64.tar.gz" -o /tmp/unikraft.tar.gz
-          tar -xzf /tmp/unikraft.tar.gz -C /tmp
-          chmod +x /tmp/unikraft
-          echo "/tmp" >> $GITHUB_PATH
-
-      - name: Login to Unikraft
+      - name: Login & Cleanup
         env:
           UKC_TOKEN: ${{ secrets.UKC_TOKEN }}
         run: |
-          echo "${UKC_TOKEN}" > /tmp/ukc_token.txt
-          unikraft login --token /tmp/ukc_token.txt --organization "${UKC_ORG}"
-
-      - name: Cleanup all instances
-        run: |
-          echo "==> 清理所有实例..."
-          METROS="fra was dal sin sfo"
-          for m in $METROS; do
-            echo "检查 ${m}..."
-            INSTANCES=$(unikraft instance list --metro "${m}" -o json 2>/dev/null || echo "[]")
-            echo "${INSTANCES}" | python3 -c "
-          import sys, json, subprocess
-          try:
-              data = json.load(sys.stdin)
-              instances = data if isinstance(data, list) else data.get('instances', [])
-          except Exception:
-              instances = []
-          for inst in instances:
-              name = inst.get('name', '')
-              if name:
-                  print(f'删除实例: {name} (metro: ${m})')
-                  subprocess.run(['unikraft', 'instance', 'delete', name, '--metro', '${m}'], check=False)
+          python3 -c "
+          import urllib.request, json
+          headers = {'Authorization': 'Bearer ${UKC_TOKEN}', 'Content-Type': 'application/json'}
+          for m in ['fra', 'was', 'dal', 'sin', 'sfo']:
+              try:
+                  req = urllib.request.Request(f'https://api.{m}.unikraft.cloud/v1/instances', headers=headers)
+                  with urllib.request.urlopen(req) as resp:
+                      data = json.loads(resp.read().decode('utf-8'))
+                  for inst in data.get('data', {}).get('instances', []):
+                      uuid = inst.get('uuid')
+                      del_req = urllib.request.Request(f'https://api.{m}.unikraft.cloud/v1/instances/{uuid}', headers=headers, method='DELETE')
+                      urllib.request.urlopen(del_req)
+                      print(f'已删除 [{m}] 实例: {inst.get(\"name\")} ({uuid})')
+              except Exception as e:
+                  print(f'[{m}] 错误: {e}')
           "
-          done
-          echo "清理完成"
