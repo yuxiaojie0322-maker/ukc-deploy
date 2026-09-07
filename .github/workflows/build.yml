@@ -22,7 +22,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: '1.23'
 
       - name: Login to Unikraft
         env:
@@ -251,7 +251,7 @@ jobs:
           go mod tidy
           
           cat << 'EOF' > Dockerfile
-          FROM golang:1.22-bookworm AS build
+          FROM golang:1.23-bookworm AS build
           WORKDIR /src
           COPY . /src
           RUN set -xe; \
