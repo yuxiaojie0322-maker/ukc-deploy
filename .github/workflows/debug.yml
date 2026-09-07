@@ -23,36 +23,9 @@ jobs:
           echo "${UKC_TOKEN}" > /tmp/token.txt
           unikraft login --token /tmp/token.txt --organization xiaojieyu
 
-      - name: Create Kraftfile and Dockerfile
+      - name: Check push help
         run: |
-          mkdir -p /tmp/myvless
-          cat << 'EOF' > /tmp/myvless/Kraftfile
-          spec: v0.7
-          name: myvless
-          cmd: ["/server"]
-          rootfs: ./Dockerfile
-          targets:
-            - architecture: x86_64
-              platform: kraftcloud
-          EOF
-
-          cat << 'EOF' > /tmp/myvless/Dockerfile
-          FROM golang:1.22-alpine AS builder
-          WORKDIR /app
-          RUN echo 'package main' > main.go && \
-              echo 'import ("fmt"; "net/http")' >> main.go && \
-              echo 'func main() {' >> main.go && \
-              echo '  http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { fmt.Fprintf(w, "vless ready") })' >> main.go && \
-              echo '  http.ListenAndServe(":8080", nil)' >> main.go && \
-              echo '}' >> main.go
-          RUN CGO_ENABLED=0 go build -o /server main.go
-
-          FROM scratch
-          COPY --from=builder /server /server
-          ENTRYPOINT ["/server"]
-          EOF
-
-      - name: Build with unikraft
-        run: |
-          echo "=== Testing unikraft image build ==="
-          unikraft image build /tmp/myvless --output unikraft.io/xiaojieyu/myvless:latest || true
+          echo "=== unikraft image push --help ==="
+          unikraft image push --help || true
+          echo "=== unikraft image build --help ==="
+          unikraft image build --help | grep -i push || true
