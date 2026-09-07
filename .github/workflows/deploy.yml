@@ -4,17 +4,17 @@ on:
   workflow_dispatch:
     inputs:
       metro:
-        description: '目标 metro（单个如 fra/was/dal/sin/sfo，留空则全部）'
+        description: '目标 metro（留空则部署全部 5 个节点，或输入单个如 fra/was/dal/sin/sfo）'
         required: false
         default: ''
-      image:
-        description: '镜像名称（默认 lxy/xapp-go）'
-        required: false
-        default: 'lxy/xapp-go'
       memory:
-        description: '内存配额 (如 128MiB, 256MiB)'
+        description: '每个实例内存配额 (如 256MiB, 512MiB, 1024MiB)'
         required: false
         default: '256MiB'
+      image:
+        description: '指定统一镜像（留空则按节点自动匹配专属镜像：fra-go, dal-js, sfo-java, was-java-obf, sin-py）'
+        required: false
+        default: ''
       action:
         description: '操作类型'
         required: false
@@ -24,7 +24,7 @@ on:
           - deploy
           - cleanup
   schedule:
-    - cron: '0 1 * * *'  # 北京时间 09:00
+    - cron: '0 1 * * *'  # 每天北京时间 09:00
 
 permissions:
   contents: read
@@ -40,12 +40,35 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        metro: ${{ github.event.inputs.metro != '' && fromJSON(format('["{0}"]', github.event.inputs.metro)) || fromJSON('["fra", "was", "dal", "sin", "sfo"]') }}
+        include:
+          - metro: fra
+            image: lxy/xapp-go
+          - metro: dal
+            image: lxy/xapp-js
+          - metro: sfo
+            image: lxy/xapp-java
+          - metro: was
+            image: lxy/xapp-java-obf
+          - metro: sin
+            image: lxy/xapp-py
     steps:
+      - name: Filter Metro
+        id: filter
+        run: |
+          TARGET="${{ github.event.inputs.metro }}"
+          CURRENT="${{ matrix.metro }}"
+          if [ -n "${TARGET}" ] && [ "${TARGET}" != "${CURRENT}" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Checkout
+        if: steps.filter.outputs.skip == 'false'
         uses: actions/checkout@v4
 
       - name: Install unikraft CLI
+        if: steps.filter.outputs.skip == 'false'
         run: |
           set -euo pipefail
           VERSION=$(curl -fsSL https://pkg.unikraft.com/endpoints/cli/content/stable.txt | tr -d '\r\n')
@@ -57,6 +80,7 @@ jobs:
           echo "/tmp" >> $GITHUB_PATH
 
       - name: Login to Unikraft
+        if: steps.filter.outputs.skip == 'false'
         env:
           UKC_TOKEN: ${{ secrets.UKC_TOKEN }}
         run: |
@@ -65,17 +89,18 @@ jobs:
           unikraft login --token /tmp/ukc_token.txt --organization "${UKC_ORG}"
 
       - name: Deploy to ${{ matrix.metro }}
+        if: steps.filter.outputs.skip == 'false'
         id: deploy
         env:
           UKC_TOKEN: ${{ secrets.UKC_TOKEN }}
           METRO: ${{ matrix.metro }}
-          IMAGE: ${{ github.event.inputs.image || 'lxy/xapp-go' }}
+          CHOSEN_IMAGE: ${{ github.event.inputs.image || matrix.image }}
           MEMORY: ${{ github.event.inputs.memory || '256MiB' }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
-          INSTANCE_NAME="ukc-${METRO}"
-          FULL_IMAGE="${IMAGE_PREFIX}${IMAGE}"
+          INSTANCE_NAME="xapp-${METRO}"
+          FULL_IMAGE="${IMAGE_PREFIX}${CHOSEN_IMAGE}"
           
           echo "==> 部署到 ${METRO}..."
           echo "    实例名: ${INSTANCE_NAME}"
@@ -83,14 +108,18 @@ jobs:
           echo "    内存: ${MEMORY}"
           echo "    组织: ${UKC_ORG}"
           
-          echo "==> 创建实例..."
+          # 先清理可能存在的同名旧实例
+          echo "==> 检查并清理已有实例..."
+          unikraft instance delete "${INSTANCE_NAME}" --metro "${METRO}" 2>/dev/null || true
+          
+          echo "==> 创建常驻运行实例（不休眠）..."
+          # 注意：不传 --scale-to-zero，使其实例 24h 持续保持 running 绿灯常驻状态
           RESULT=$(unikraft run \
             --name "${INSTANCE_NAME}" \
             --metro "${METRO}" \
             --image "${FULL_IMAGE}" \
             --memory "${MEMORY}" \
             --vcpus 1 \
-            --scale-to-zero "policy=on,cooldown-time=1000" \
             -p 443:8080/http+tls \
             -p 80:8080/http \
             -o json 2>&1) || true
@@ -98,23 +127,19 @@ jobs:
           echo "创建结果: ${RESULT}"
           
           # 等待实例就绪
-          echo "==> 等待实例就绪..."
+          echo "==> 等待实例进入 running 状态..."
           TIMEOUT=120
           COUNT=0
           STATUS="unknown"
           while [ $COUNT -lt $TIMEOUT ]; do
             STATUS=$(unikraft instance get "${INSTANCE_NAME}" --metro "${METRO}" -o json 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); d=d[0] if isinstance(d,list) else (d.get('data',{}).get('instances',[d])[0] if 'data' in d else d.get('instances',[d])[0]); print(d.get('state','unknown'))" 2>/dev/null || echo "error")
             echo "[$COUNT/$TIMEOUT] 状态: ${STATUS}"
-            if [ "${STATUS}" = "running" ] || [ "${STATUS}" = "standby" ]; then
+            if [ "${STATUS}" = "running" ]; then
               break
             fi
             sleep 5
             COUNT=$((COUNT + 5))
           done
-          
-          if [ "${STATUS}" != "running" ] && [ "${STATUS}" != "standby" ]; then
-            echo "::warning::实例当前状态为: ${STATUS}，继续尝试获取域名..."
-          fi
           
           # 获取 FQDN 域名
           FQDN=$(unikraft instance get "${INSTANCE_NAME}" --metro "${METRO}" -o json 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); d=d[0] if isinstance(d,list) else (d.get('data',{}).get('instances',[d])[0] if 'data' in d else d.get('instances',[d])[0]); domains=d.get('service_group',{}).get('domains',[]); print(domains[0].get('fqdn') if domains and isinstance(domains[0],dict) else d.get('fqdn', d.get('domain', 'unknown')))" 2>/dev/null || echo "unknown")
@@ -126,7 +151,7 @@ jobs:
           if [ "${HTTP_CODE}" = "200" ] || [ "${HTTP_CODE}" = "301" ] || [ "${HTTP_CODE}" = "302" ]; then
             DEPLOY_STATUS="✅ running (HTTP ${HTTP_CODE})"
           else
-            DEPLOY_STATUS="⚡ ready/standby (HTTP ${HTTP_CODE})"
+            DEPLOY_STATUS="⚡ active (HTTP ${HTTP_CODE})"
           fi
           echo "状态: ${DEPLOY_STATUS}"
           
@@ -137,7 +162,7 @@ jobs:
           
           # 发送 Telegram 通知
           if [ -n "${TG_BOT_TOKEN}" ] && [ -n "${TG_CHAT_ID}" ]; then
-            MESSAGE="🚀 ${METRO} 部署完成\n\n实例: ${INSTANCE_NAME}\nFQDN: https://${FQDN}\n状态: ${DEPLOY_STATUS}"
+            MESSAGE="🚀 ${METRO} 常驻部署完成\n\n实例: ${INSTANCE_NAME}\n镜像: ${CHOSEN_IMAGE}\nFQDN: https://${FQDN}\n状态: ${DEPLOY_STATUS}"
             curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
               -H "Content-Type: application/json" \
               -d "{\"chat_id\":\"${TG_CHAT_ID}\",\"text\":\"${MESSAGE}\",\"parse_mode\":\"Markdown\"}" \
@@ -145,6 +170,7 @@ jobs:
           fi
 
       - name: 汇总报告
+        if: steps.filter.outputs.skip == 'false'
         run: |
           METRO="${{ steps.deploy.outputs.metro }}"
           FQDN="${{ steps.deploy.outputs.fqdn }}"
@@ -180,45 +206,25 @@ jobs:
           echo "${UKC_TOKEN}" > /tmp/ukc_token.txt
           unikraft login --token /tmp/ukc_token.txt --organization "${UKC_ORG}"
 
-      - name: Cleanup instances
-        env:
-          KEEP_METROS: "fra,was,dal,sin,sfo"
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+      - name: Cleanup all instances
         run: |
-          echo "==> 清理不在保留列表中的实例..."
-          echo "保留 metro: ${KEEP_METROS}"
-          
-          INSTANCES=$(unikraft instance list -o json 2>/dev/null || echo "[]")
-          
-          echo "${INSTANCES}" | python3 -c "
+          echo "==> 清理所有实例..."
+          METROS="fra was dal sin sfo"
+          for m in $METROS; do
+            echo "检查 ${m}..."
+            INSTANCES=$(unikraft instance list --metro "${m}" -o json 2>/dev/null || echo "[]")
+            echo "${INSTANCES}" | python3 -c "
           import sys, json, subprocess
-          
-          keep_metros = set('${KEEP_METROS}'.split(','))
           try:
               data = json.load(sys.stdin)
               instances = data if isinstance(data, list) else data.get('instances', [])
           except Exception:
               instances = []
-          
-          deleted = []
           for inst in instances:
-              metro = inst.get('metro', '')
               name = inst.get('name', '')
-              if metro and metro not in keep_metros:
-                  print(f'删除实例: {name} (metro: {metro})')
-                  subprocess.run(['unikraft', 'instance', 'delete', name, '--metro', metro], check=False)
-                  deleted.append(name)
-              else:
-                  print(f'保留实例: {name} (metro: {metro})')
-          
-          print(f'共删除 {len(deleted)} 个实例')
+              if name:
+                  print(f'删除实例: {name} (metro: ${m})')
+                  subprocess.run(['unikraft', 'instance', 'delete', name, '--metro', '${m}'], check=False)
           "
-          
+          done
           echo "清理完成"
-          if [ -n "${TG_BOT_TOKEN}" ] && [ -n "${TG_CHAT_ID}" ]; then
-            curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
-              -H "Content-Type: application/json" \
-              -d "{\"chat_id\":\"${TG_CHAT_ID}\",\"text\":\"🧹 UKC 清理完成\\n保留: ${KEEP_METROS}\",\"parse_mode\":\"Markdown\"}" \
-              || true
-          fi
