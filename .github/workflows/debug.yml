@@ -25,14 +25,16 @@ jobs:
 
       - name: Get Logs of test-live
         run: |
-          echo "=== unikraft logs ad62bc96-efb1-493c-841c-f3b01290d041 ==="
-          unikraft logs ad62bc96-efb1-493c-841c-f3b01290d041 || true
+          echo "=== unikraft instance logs --help ==="
+          unikraft instance logs --help || true
+          echo "=== fetch logs of test-live ==="
+          unikraft instance logs ad62bc96-efb1-493c-841c-f3b01290d041 --metro fra || true
+          echo "=== fetch logs of xapp-fra ==="
+          unikraft instance logs xapp-fra --metro fra || true
 
-      - name: Test different args and flags
+      - name: Inspect image metadata
         run: |
-          # Test with --help
-          echo "=== Test with -- --help ==="
-          unikraft run --rm --metro fra --memory 256MiB oci://unikraft.io/lxy/xapp-go -- --help || true
-
-          echo "=== Test with -e PORT=8080 ==="
-          unikraft run --rm --metro fra --memory 256MiB -e PORT=8080 oci://unikraft.io/lxy/xapp-go || true
+          echo "=== unikraft image --help ==="
+          unikraft image --help || true
+          echo "=== unikraft image list ==="
+          unikraft image list || true
