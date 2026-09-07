@@ -23,34 +23,16 @@ jobs:
           echo "${UKC_TOKEN}" > /tmp/token.txt
           unikraft login --token /tmp/token.txt --organization xiaojieyu
 
-      - name: Inspect CLI Help
+      - name: Get Logs of test-live
         run: |
-          echo "=== unikraft run --help ==="
-          unikraft run --help || true
-          echo "=== unikraft instance --help ==="
-          unikraft instance --help || true
-          echo "=== unikraft instance start --help ==="
-          unikraft instance start --help || true
-          echo "=== unikraft instance log --help ==="
-          unikraft instance log --help || true
+          echo "=== unikraft logs ad62bc96-efb1-493c-841c-f3b01290d041 ==="
+          unikraft logs ad62bc96-efb1-493c-841c-f3b01290d041 || true
 
-      - name: Test Run without scale-to-zero
+      - name: Test different args and flags
         run: |
-          echo "==> Testing run without scale-to-zero on fra..."
-          unikraft instance delete test-live --metro fra 2>/dev/null || true
-          unikraft run \
-            --name test-live \
-            --metro fra \
-            --image oci://unikraft.io/lxy/xapp-go \
-            --memory 256MiB \
-            --vcpus 1 \
-            -p 443:8080/http+tls \
-            -p 80:8080/http \
-            -o json || true
-          
-          sleep 5
-          echo "==> Checking test-live status..."
-          unikraft instance get test-live --metro fra -o json || true
-          
-          echo "==> Checking test-live log..."
-          unikraft instance log test-live --metro fra || true
+          # Test with --help
+          echo "=== Test with -- --help ==="
+          unikraft run --rm --metro fra --memory 256MiB oci://unikraft.io/lxy/xapp-go -- --help || true
+
+          echo "=== Test with -e PORT=8080 ==="
+          unikraft run --rm --metro fra --memory 256MiB -e PORT=8080 oci://unikraft.io/lxy/xapp-go || true
