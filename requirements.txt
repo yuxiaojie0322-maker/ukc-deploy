@@ -1,0 +1,2 @@
+﻿# Python dependencies (if needed)
+requests>=2.28.0

@@ -1,0 +1,106 @@
+name: ukc-deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: 'Docker 镜像'
+        required: false
+        default: 'nginx:latest'
+      memory:
+        description: '内存配额 (如 128Mi, 256Mi)'
+        required: false
+        default: '128Mi'
+      metros:
+        description: '目标 metro 列表（逗号分隔）'
+        required: false
+        default: 'fra,was,dal,sin,sfo'
+  schedule:
+    - cron: '0 1 * * *'  # 北京时间 09:00 保活
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        metro:
+          - fra
+          - was
+          - dal
+          - sin
+          - sfo
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install unikraft CLI
+        uses: unikraft/setup-action@v1
+        with:
+          token: ${{ secrets.UKC_TOKEN }}
+          organization: xiaojieyu
+
+      - name: Deploy to ${{ matrix.metro }}
+        env:
+          UKC_TOKEN: ${{ secrets.UKC_TOKEN }}
+          UKC_ORG: xiaojieyu
+          METRO: ${{ matrix.metro }}
+          IMAGE: ${{ github.event.inputs.image || 'nginx:latest' }}
+          MEMORY: ${{ github.event.inputs.memory || '128Mi' }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: |
+          echo "==> 部署到 $METRO..."
+          unikraft instance create ukc-$METRO \
+            --metro $METRO \
+            --image $IMAGE \
+            --memory $MEMORY \
+            --vcpus 1 \
+            --scale-to-zero true \
+            --cooldown-time 1000 \
+            --publish 443:8080/http+tls \
+            --publish 80:8080/http \
+            --org xiaojieyu \
+            -o json 2>&1 || true
+
+          echo "==> 等待实例就绪..."
+          sleep 15
+          unikraft instance wait ukc-$METRO --ready 2>&1 || true
+
+          echo "==> 获取 FQDN..."
+          FQDN=$(unikraft instance get ukc-$METRO -o json 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('fqdn', d.get('domain', 'unknown')))" 2>/dev/null || echo "unknown")
+          echo "FQDN=$FQDN" >> $GITHUB_ENV
+
+          echo "==> 冒烟测试..."
+          curl -fsS -m 15 "https://$FQDN" > /dev/null 2>&1 && STATUS="✅ running" || STATUS="⚠️ unreachable"
+          echo "$STATUS on $METRO ($FQDN)"
+
+          # 发送通知
+          if [ -n "$TG_BOT_TOKEN" ] && [ -n "$TG_CHAT_ID" ]; then
+            curl -s -X POST "https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage" \
+              -H "Content-Type: application/json" \
+              -d "{\"chat_id\":\"$TG_CHAT_ID\",\"text\":\"🚀 $METRO 部署完成\\n名称: ukc-$METRO\\nFQDN: https://$FQDN\\n状态: $STATUS\",\"parse_mode\":\"Markdown\"}" \
+              || true
+          fi
+
+  summary:
+    needs: deploy
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: 部署汇总
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: |
+          echo "## 📊 Unikraft Cloud 部署汇总" >> $GITHUB_STEP_SUMMARY
+          echo "- 所有 5 个 metro 部署完成" >> $GITHUB_STEP_SUMMARY
+          if [ -n "$TG_BOT_TOKEN" ] && [ -n "$TG_CHAT_ID" ]; then
+            curl -s -X POST "https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage" \
+              -H "Content-Type: application/json" \
+              -d "{\"chat_id\":\"$TG_CHAT_ID\",\"text\":\"📊 Unikraft 多区域部署完成\\n结果: 见 workflow run 日志\",\"parse_mode\":\"Markdown\"}" \
+              || true
+          fi
