@@ -23,7 +23,10 @@ jobs:
           echo "${UKC_TOKEN}" > /tmp/token.txt
           unikraft login --token /tmp/token.txt --organization xiaojieyu
 
-      - name: Test tunnel image
+      - name: Test Docker Hub image
         run: |
-          echo "=== testing official/utils/tunnel:1.0 ==="
-          unikraft run --rm --metro fra --memory 256MiB --image official/utils/tunnel:1.0 -- --help || true
+          echo "=== testing official/nginx:1.25 ==="
+          unikraft run --rm --metro fra --memory 256MiB --image official/nginx:1.25 -p 80:80/http || true
+
+          echo "=== testing docker.io/library/nginx ==="
+          unikraft run --rm --metro fra --memory 256MiB --image docker.io/library/nginx:alpine || true
