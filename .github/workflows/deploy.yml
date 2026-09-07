@@ -72,7 +72,7 @@ jobs:
           UKC_TOKEN: ${{ secrets.UKC_TOKEN }}
           METRO: ${{ matrix.metro }}
           IMAGE: ${{ github.event.inputs.image || 'lxy/xapp-go' }}
-          MEMORY: ${{ github.event.inputs.memory || '256Mi' }}
+          MEMORY: ${{ github.event.inputs.memory || '256MiB' }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
