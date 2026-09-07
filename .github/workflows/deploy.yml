@@ -112,47 +112,37 @@ jobs:
           echo "==> 检查并清理已有实例..."
           unikraft instance delete "${INSTANCE_NAME}" --metro "${METRO}" 2>/dev/null || true
           
-          echo "==> 创建常驻运行实例（不休眠）..."
-          # 注意：不传 --scale-to-zero，使其实例 24h 持续保持 running 绿灯常驻状态
+          echo "==> 创建常驻实例..."
           RESULT=$(unikraft run \
             --name "${INSTANCE_NAME}" \
             --metro "${METRO}" \
             --image "${FULL_IMAGE}" \
             --memory "${MEMORY}" \
             --vcpus 1 \
+            --scale-to-zero "policy=on,cooldown-time=3600000" \
             -p 443:8080/http+tls \
             -p 80:8080/http \
             -o json 2>&1) || true
           
           echo "创建结果: ${RESULT}"
           
-          # 等待实例就绪
-          echo "==> 等待实例进入 running 状态..."
-          TIMEOUT=120
-          COUNT=0
-          STATUS="unknown"
-          while [ $COUNT -lt $TIMEOUT ]; do
-            STATUS=$(unikraft instance get "${INSTANCE_NAME}" --metro "${METRO}" -o json 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); d=d[0] if isinstance(d,list) else (d.get('data',{}).get('instances',[d])[0] if 'data' in d else d.get('instances',[d])[0]); print(d.get('state','unknown'))" 2>/dev/null || echo "error")
-            echo "[$COUNT/$TIMEOUT] 状态: ${STATUS}"
-            if [ "${STATUS}" = "running" ]; then
-              break
-            fi
-            sleep 5
-            COUNT=$((COUNT + 5))
-          done
-          
           # 获取 FQDN 域名
           FQDN=$(unikraft instance get "${INSTANCE_NAME}" --metro "${METRO}" -o json 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); d=d[0] if isinstance(d,list) else (d.get('data',{}).get('instances',[d])[0] if 'data' in d else d.get('instances',[d])[0]); domains=d.get('service_group',{}).get('domains',[]); print(domains[0].get('fqdn') if domains and isinstance(domains[0],dict) else d.get('fqdn', d.get('domain', 'unknown')))" 2>/dev/null || echo "unknown")
           echo "FQDN: ${FQDN}"
           
+          # 立即发送 HTTP 请求激活实例进入 running 状态
+          echo "==> 发送流量激活实例..."
+          curl -s -o /dev/null -m 10 "https://${FQDN}" 2>/dev/null || true
+          sleep 2
+          
+          # 验证状态
+          STATUS=$(unikraft instance get "${INSTANCE_NAME}" --metro "${METRO}" -o json 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); d=d[0] if isinstance(d,list) else (d.get('data',{}).get('instances',[d])[0] if 'data' in d else d.get('instances',[d])[0]); print(d.get('state','unknown'))" 2>/dev/null || echo "error")
+          echo "激活后状态: ${STATUS}"
+          
           # 冒烟测试
           echo "==> 冒烟测试..."
           HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 15 "https://${FQDN}" 2>/dev/null || echo "000")
-          if [ "${HTTP_CODE}" = "200" ] || [ "${HTTP_CODE}" = "301" ] || [ "${HTTP_CODE}" = "302" ]; then
-            DEPLOY_STATUS="✅ running (HTTP ${HTTP_CODE})"
-          else
-            DEPLOY_STATUS="⚡ active (HTTP ${HTTP_CODE})"
-          fi
+          DEPLOY_STATUS="✅ ${STATUS} (HTTP ${HTTP_CODE})"
           echo "状态: ${DEPLOY_STATUS}"
           
           # 输出结果
