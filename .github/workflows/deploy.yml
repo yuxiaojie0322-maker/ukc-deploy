@@ -96,7 +96,6 @@ jobs:
             --scale-to-zero "policy=on,cooldown-time=1000" \
             -p 443:8080/http+tls \
             -p 80:8080/http \
-            --organization "${UKC_ORG}" \
             -o json 2>&1) || true
           
           echo "创建结果: ${RESULT}"
