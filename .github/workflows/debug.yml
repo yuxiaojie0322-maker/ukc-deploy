@@ -16,11 +16,6 @@ jobs:
           chmod +x /tmp/unikraft
           echo "/tmp" >> $GITHUB_PATH
 
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.22'
-
       - name: Login to Unikraft
         env:
           UKC_TOKEN: ${{ secrets.UKC_TOKEN }}
@@ -28,70 +23,19 @@ jobs:
           echo "${UKC_TOKEN}" > /tmp/token.txt
           unikraft login --token /tmp/token.txt --organization xiaojieyu
 
-      - name: Build tailored vless-ws-go
+      - name: Test run with 1024MiB
         run: |
-          git clone https://github.com/liseipi/vless-ws-go.git /tmp/vless-src
-          mkdir -p /tmp/vless-pkg
-          cd /tmp/vless-src
-          
-          # Patch config.go defaults
-          sed -i 's|envStr("PORT", "8081")|envStr("PORT", "8080")|g' config.go
-          sed -i 's|envStr("WS_PATH", "/api")|envStr("WS_PATH", "/")|g' config.go
-          sed -i 's|UUID:  envStr("UUID", "")|UUID:  envStr("UUID", "694949f5-54c3-4113-b3c9-2d2518f770f4")|g' config.go
-          
-          # Patch main.go
-          python3 -c '
-          with open("main.go", "r") as f:
-              s = f.read()
-          idx = s.index("go func() {")
-          afterIdx = s.index("func clientIP(")
-          s = s[:idx] + "printBanner(cfg)\n\tif err := httpServer.ListenAndServe(); err != nil {\n\t\tlog.Error(\"listen error:\", err.Error())\n\t\tos.Exit(1)\n\t}\n}\n\n" + s[afterIdx:]
-          s = s.replace("\"context\"\n", "").replace("\"os/signal\"\n", "").replace("\"syscall\"\n", "")
-          with open("main.go", "w") as f:
-              f.write(s)
-          '
-          
-          go mod tidy
-          CGO_ENABLED=0 go build -ldflags="-s -w" -o /tmp/vless-pkg/vless-server .
-          
-          cd /tmp/vless-pkg
-          cat << 'EOF' > Dockerfile
-          FROM scratch
-          COPY vless-server /vless-server
-          ENTRYPOINT ["/vless-server"]
-          EOF
-
-          cat << 'EOF' > Kraftfile
-          spec: v0.7
-          name: vless
-          cmd: ["/vless-server"]
-          rootfs: ./Dockerfile
-          targets:
-            - architecture: x86_64
-              platform: kraftcloud
-          EOF
-
-          echo "=== Building Unikraft unikernel image ==="
-          unikraft image build . --output /tmp/vless.tar
-
-          echo "=== Copying image to Unikraft Cloud registry ==="
-          unikraft image copy /tmp/vless.tar unikraft.io/xiaojieyu/vless:latest
-
-      - name: Test run in fra
-        run: |
-          echo "=== Testing deployment in fra ==="
           unikraft instance delete vless-live --metro fra 2>/dev/null || true
           unikraft run \
             --name vless-live \
             --metro fra \
             --image oci://unikraft.io/xiaojieyu/vless:latest \
-            --memory 256MiB \
+            --memory 1024MiB \
             --vcpus 1 \
             -p 443:8080/http+tls \
             -p 80:8080/http \
             -o json || true
           
           sleep 6
-          echo "=== Checking state after 6 seconds ==="
           unikraft instance get vless-live -o json || true
-          unikraft instance logs vless-live || true
+          curl -I "https://twilight-wave-vqb6glk4.fra.unikraft.app/health" || true
