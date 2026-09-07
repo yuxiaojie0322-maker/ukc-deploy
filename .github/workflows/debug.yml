@@ -16,25 +16,7 @@ jobs:
           chmod +x /tmp/unikraft
           echo "/tmp" >> $GITHUB_PATH
 
-      - name: Login
-        env:
-          UKC_TOKEN: ${{ secrets.UKC_TOKEN }}
+      - name: Check build help
         run: |
-          echo "${UKC_TOKEN}" > /tmp/token.txt
-          unikraft login --token /tmp/token.txt --organization xiaojieyu
-
-      - name: Test official tunnel
-        run: |
-          echo "=== Testing official/utils/tunnel:1.0 ==="
-          unikraft run \
-            --name test-tunnel \
-            --metro fra \
-            --image official/utils/tunnel:1.0 \
-            --memory 256MiB \
-            --vcpus 1 \
-            -p 443:8080/http+tls \
-            -o json || true
-          
-          sleep 5
-          unikraft instance get test-tunnel || true
-          unikraft instance logs test-tunnel || true
+          echo "=== unikraft image build --help ==="
+          unikraft image build --help || true
