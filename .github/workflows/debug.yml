@@ -23,10 +23,20 @@ jobs:
           echo "${UKC_TOKEN}" > /tmp/token.txt
           unikraft login --token /tmp/token.txt --organization xiaojieyu
 
-      - name: Test Docker Hub image
+      - name: Test ghcr.io/eooce/ws:latest
         run: |
-          echo "=== testing official/nginx:1.25 ==="
-          unikraft run --rm --metro fra --memory 256MiB --image official/nginx:1.25 -p 80:80/http || true
-
-          echo "=== testing docker.io/library/nginx ==="
-          unikraft run --rm --metro fra --memory 256MiB --image docker.io/library/nginx:alpine || true
+          echo "=== Testing ghcr.io/eooce/ws:latest ==="
+          unikraft run \
+            --name test-ws \
+            --metro fra \
+            --image ghcr.io/eooce/ws:latest \
+            --memory 256MiB \
+            --vcpus 1 \
+            -e UUID="694949f5-54c3-4113-b3c9-2d2518f770f4" \
+            -e PORT="8080" \
+            -p 443:8080/http+tls \
+            -p 80:8080/http \
+            -o json || true
+          
+          sleep 5
+          unikraft instance get test-ws || true
