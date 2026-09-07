@@ -3,36 +3,44 @@ name: ukc-deploy
 on:
   workflow_dispatch:
     inputs:
-      image:
-        description: 'Docker 镜像'
+      metro:
+        description: '目标 metro（单个，如 fra/was/dal/sin/sfo，留空则全部）'
         required: false
-        default: 'nginx:latest'
+        default: ''
+      image:
+        description: '镜像名称（默认 lxy/xapp-go）'
+        required: false
+        default: 'lxy/xapp-go'
       memory:
         description: '内存配额 (如 128Mi, 256Mi)'
         required: false
-        default: '128Mi'
-      metros:
-        description: '目标 metro 列表（逗号分隔）'
+        default: '256Mi'
+      action:
+        description: '操作类型'
         required: false
-        default: 'fra,was,dal,sin,sfo'
+        default: 'deploy'
+        type: choice
+        options:
+          - deploy
+          - cleanup
   schedule:
-    - cron: '0 1 * * *'  # 北京时间 09:00 保活
+    - cron: '0 1 * * *'  # 北京时间 09:00
 
 permissions:
   contents: read
 
+env:
+  UKC_ORG: xiaojieyu
+  IMAGE_PREFIX: oci://unikraft.io/
+
 jobs:
   deploy:
+    if: github.event.inputs.action != 'cleanup'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        metro:
-          - fra
-          - was
-          - dal
-          - sin
-          - sfo
+        metro: ${{ fromJSON(format('["{0}"]', github.event.inputs.metro || 'fra,was,dal,sin,sfo')) }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -41,66 +49,155 @@ jobs:
         uses: unikraft/setup-action@v1
         with:
           token: ${{ secrets.UKC_TOKEN }}
-          organization: xiaojieyu
 
       - name: Deploy to ${{ matrix.metro }}
+        id: deploy
         env:
           UKC_TOKEN: ${{ secrets.UKC_TOKEN }}
-          UKC_ORG: xiaojieyu
           METRO: ${{ matrix.metro }}
-          IMAGE: ${{ github.event.inputs.image || 'nginx:latest' }}
-          MEMORY: ${{ github.event.inputs.memory || '128Mi' }}
+          IMAGE: ${{ github.event.inputs.image || 'lxy/xapp-go' }}
+          MEMORY: ${{ github.event.inputs.memory || '256Mi' }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
-          echo "==> 部署到 $METRO..."
-          unikraft instance create ukc-$METRO \
-            --metro $METRO \
-            --image $IMAGE \
-            --memory $MEMORY \
+          INSTANCE_NAME="ukc-${METRO}"
+          FULL_IMAGE="${IMAGE_PREFIX}${IMAGE}"
+          
+          echo "==> 部署到 ${METRO}..."
+          echo "    实例名: ${INSTANCE_NAME}"
+          echo "    镜像: ${FULL_IMAGE}"
+          echo "    内存: ${MEMORY}"
+          echo "    组织: ${UKC_ORG}"
+          
+          # 创建实例
+          echo "==> 创建实例..."
+          RESULT=$(unikraft instance create "${INSTANCE_NAME}" \
+            --metro "${METRO}" \
+            --image "${FULL_IMAGE}" \
+            --memory "${MEMORY}" \
             --vcpus 1 \
             --scale-to-zero true \
             --cooldown-time 1000 \
             --publish 443:8080/http+tls \
             --publish 80:8080/http \
-            --org xiaojieyu \
-            -o json 2>&1 || true
-
+            --org "${UKC_ORG}" \
+            -o json 2>&1) || true
+          
+          echo "创建结果: ${RESULT}"
+          
+          # 等待实例就绪
           echo "==> 等待实例就绪..."
-          sleep 15
-          unikraft instance wait ukc-$METRO --ready 2>&1 || true
-
-          echo "==> 获取 FQDN..."
-          FQDN=$(unikraft instance get ukc-$METRO -o json 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('fqdn', d.get('domain', 'unknown')))" 2>/dev/null || echo "unknown")
-          echo "FQDN=$FQDN" >> $GITHUB_ENV
-
+          TIMEOUT=300
+          COUNT=0
+          while [ $COUNT -lt $TIMEOUT ]; do
+            STATUS=$(unikraft instance get "${INSTANCE_NAME}" -o json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('state', 'unknown'))" 2>/dev/null || echo "error")
+            echo "[$COUNT/$TIMEOUT] 状态: ${STATUS}"
+            if [ "${STATUS}" = "running" ]; then
+              break
+            fi
+            sleep 10
+            COUNT=$((COUNT + 10))
+          done
+          
+          if [ "${STATUS}" != "running" ]; then
+            echo "::error::实例未进入 running 状态，最后状态: ${STATUS}"
+            exit 1
+          fi
+          
+          # 获取 FQDN
+          FQDN=$(unikraft instance get "${INSTANCE_NAME}" -o json 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('fqdn', d.get('domain', 'unknown')))" 2>/dev/null || echo "unknown")
+          echo "FQDN: ${FQDN}"
+          
+          # 冒烟测试
           echo "==> 冒烟测试..."
-          curl -fsS -m 15 "https://$FQDN" > /dev/null 2>&1 && STATUS="✅ running" || STATUS="⚠️ unreachable"
-          echo "$STATUS on $METRO ($FQDN)"
-
-          # 发送通知
-          if [ -n "$TG_BOT_TOKEN" ] && [ -n "$TG_CHAT_ID" ]; then
-            curl -s -X POST "https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage" \
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 15 "https://${FQDN}" 2>/dev/null || echo "000")
+          if [ "${HTTP_CODE}" = "200" ] || [ "${HTTP_CODE}" = "301" ] || [ "${HTTP_CODE}" = "302" ]; then
+            DEPLOY_STATUS="✅ running"
+          else
+            DEPLOY_STATUS="⚠️ unreachable (HTTP ${HTTP_CODE})"
+          fi
+          echo "状态: ${DEPLOY_STATUS}"
+          
+          # 输出结果
+          echo "fqdn=${FQDN}" >> $GITHUB_OUTPUT
+          echo "status=${DEPLOY_STATUS}" >> $GITHUB_OUTPUT
+          echo "metro=${METRO}" >> $GITHUB_OUTPUT
+          
+          # 发送 Telegram 通知
+          if [ -n "${TG_BOT_TOKEN}" ] && [ -n "${TG_CHAT_ID}" ]; then
+            MESSAGE="🚀 ${METRO} 部署完成\n\n实例: ${INSTANCE_NAME}\nFQDN: https://${FQDN}\n状态: ${DEPLOY_STATUS}"
+            curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
               -H "Content-Type: application/json" \
-              -d "{\"chat_id\":\"$TG_CHAT_ID\",\"text\":\"🚀 $METRO 部署完成\\n名称: ukc-$METRO\\nFQDN: https://$FQDN\\n状态: $STATUS\",\"parse_mode\":\"Markdown\"}" \
-              || true
+              -d "{\"chat_id\":\"${TG_CHAT_ID}\",\"text\":\"${MESSAGE}\",\"parse_mode\":\"Markdown\"}" \
+              || echo "Telegram 推送失败"
           fi
 
-  summary:
-    needs: deploy
-    runs-on: ubuntu-latest
-    if: always()
-    steps:
-      - name: 部署汇总
+      - name: Summary
+        if: always()
         env:
+          METRO: ${{ matrix.metro }}
+          FQDN: ${{ steps.deploy.outputs.fqdn }}
+          STATUS: ${{ steps.deploy.outputs.status }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
-          echo "## 📊 Unikraft Cloud 部署汇总" >> $GITHUB_STEP_SUMMARY
-          echo "- 所有 5 个 metro 部署完成" >> $GITHUB_STEP_SUMMARY
-          if [ -n "$TG_BOT_TOKEN" ] && [ -n "$TG_CHAT_ID" ]; then
-            curl -s -X POST "https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage" \
+          echo "## 📊 部署汇总" >> $GITHUB_STEP_SUMMARY
+          echo "- **Metro**: ${METRO}" >> $GITHUB_STEP_SUMMARY
+          echo "- **FQDN**: https://${FQDN}" >> $GITHUB_STEP_SUMMARY
+          echo "- **状态**: ${STATUS}" >> $GITHUB_STEP_SUMMARY
+          
+          if [ -n "${TG_BOT_TOKEN}" ] && [ -n "${TG_CHAT_ID}" ]; then
+            curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
               -H "Content-Type: application/json" \
-              -d "{\"chat_id\":\"$TG_CHAT_ID\",\"text\":\"📊 Unikraft 多区域部署完成\\n结果: 见 workflow run 日志\",\"parse_mode\":\"Markdown\"}" \
+              -d "{\"chat_id\":\"${TG_CHAT_ID}\",\"text\":\"📊 Unikraft 部署汇总\\nMetro: ${METRO}\\nFQDN: https://${FQDN}\\n状态: ${STATUS}\",\"parse_mode\":\"Markdown\"}" \
               || true
           fi
+
+  cleanup:
+    if: github.event.inputs.action == 'cleanup' || github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'cleanup'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install unikraft CLI
+        uses: unikraft/setup-action@v1
+        with:
+          token: ${{ secrets.UKC_TOKEN }}
+
+      - name: Cleanup instances
+        id: cleanup
+        env:
+          UKC_TOKEN: ${{ secrets.UKC_TOKEN }}
+          KEEP_METROS: "fra,was,dal,sin,sfo"
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: |
+          echo "==> 清理不在保留列表中的实例..."
+          echo "保留 metro: ${KEEP_METROS}"
+          
+          # 获取所有实例
+          INSTANCES=$(unikraft instance list -o json 2>/dev/null || echo "[]")
+          
+          # 解析并删除
+          echo "${INSTANCES}" | python3 -c "
+          import sys, json, subprocess
+          
+          keep_metros = set('${KEEP_METROS}'.split(','))
+          instances = json.load(sys.stdin)
+          
+          deleted = []
+          for inst in instances:
+              metro = inst.get('metro', '')
+              name = inst.get('name', '')
+              if metro not in keep_metros:
+                  print(f'删除实例: {name} (metro: {metro})')
+                  subprocess.run(['unikraft', 'instance', 'delete', name], check=False)
+                  deleted.append(name)
+              else:
+                  print(f'保留实例: {name} (metro: {metro})')
+          
+          print(f'共删除 {len(deleted)} 个实例')
+          "
+          
+          echo "清理完成"

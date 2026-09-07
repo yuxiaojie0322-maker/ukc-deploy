@@ -27,11 +27,23 @@
 
 ## 部署配置
 
+### 默认镜像（建议直接可用）
+
+| Metro | 镜像 | 语言 | 现有实例名 |
+|-------|------|------|-----------|
+| sin | lxy/xapp-python | Python | xapp-sin |
+| was | lxy/xapp-java | Java | edge-was-jm44f0 |
+| sfo | lxy/xapp-java | Java | node-sfo-jv91bd |
+| dal | lxy/xapp-js | JavaScript | relay-dal-js7c2e |
+| fra | lxy/xapp-go | Go | svc-fra-pyf3a9 |
+
+### 手动触发参数
+
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `image` | `nginx:latest` | Docker 镜像 |
-| `memory` | `128Mi` | 内存配额 |
-| `metros` | `fra,was,dal,sin,sfo` | 逗号分隔的 metro 列表 |
+| `metro` | 全部5个 | 指定单个 metro 部署，或留空全部部署 |
+| `image` | `lxy/xapp-go` | 镜像名称（不含前缀） |
+| `memory` | `256Mi` | 内存配额 |
 
 ## 资源规格
 
