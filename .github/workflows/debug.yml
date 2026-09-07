@@ -23,9 +23,40 @@ jobs:
           echo "${UKC_TOKEN}" > /tmp/token.txt
           unikraft login --token /tmp/token.txt --organization xiaojieyu
 
-      - name: Check push help
+      - name: Build to tar and copy to registry
         run: |
-          echo "=== unikraft image push --help ==="
-          unikraft image push --help || true
-          echo "=== unikraft image build --help ==="
-          unikraft image build --help | grep -i push || true
+          mkdir -p /tmp/myvless
+          cat << 'EOF' > /tmp/myvless/Kraftfile
+          spec: v0.7
+          name: myvless
+          cmd: ["/server"]
+          rootfs: ./Dockerfile
+          targets:
+            - architecture: x86_64
+              platform: kraftcloud
+          EOF
+
+          cat << 'EOF' > /tmp/myvless/Dockerfile
+          FROM golang:1.22-alpine AS builder
+          WORKDIR /app
+          RUN echo 'package main' > main.go && \
+              echo 'import ("fmt"; "net/http")' >> main.go && \
+              echo 'func main() {' >> main.go && \
+              echo '  http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { fmt.Fprintf(w, "vless ready\n") })' >> main.go && \
+              echo '  http.ListenAndServe(":8080", nil)' >> main.go && \
+              echo '}' >> main.go
+          RUN CGO_ENABLED=0 go build -o /server main.go
+
+          FROM scratch
+          COPY --from=builder /server /server
+          ENTRYPOINT ["/server"]
+          EOF
+
+          echo "=== 1. Building to tar ==="
+          unikraft image build /tmp/myvless --output /tmp/myvless.tar
+
+          echo "=== 2. Copying tar to Unikraft registry ==="
+          unikraft image copy /tmp/myvless.tar unikraft.io/xiaojieyu/myvless:latest
+
+          echo "=== 3. List images ==="
+          unikraft image list || true
