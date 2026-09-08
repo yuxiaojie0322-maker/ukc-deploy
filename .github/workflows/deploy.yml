@@ -5,26 +5,26 @@ on:
     branches:
       - main
     paths:
-      - 'vless/**'
+      - 'x-tunnel/**'
       - '.github/workflows/deploy.yml'
   workflow_dispatch:
     inputs:
       action:
         description: '操作类型'
         required: true
-        default: 'build-and-deploy'
+        default: 'deploy-only'
         type: choice
         options:
-          - build-and-deploy
           - deploy-only
+          - build-and-deploy
           - build-only
           - cleanup
       metro:
         description: '目标 metro（留空则部署全部 5 个节点：fra/was/dal/sin/sfo）'
         required: false
         default: ''
-      uuid:
-        description: 'VLESS 节点 UUID 密钥'
+      token:
+        description: 'x-tunnel 认证 Token'
         required: false
         default: '694949f5-54c3-4113-b3c9-2d2518f770f4'
       memory:
@@ -39,12 +39,12 @@ permissions:
 
 env:
   UKC_ORG: xiaojieyu
-  IMAGE_NAME: xiaojieyu/vless:latest
+  IMAGE_NAME: xiaojieyu/x-tunnel:latest
   IMAGE_PREFIX: oci://unikraft.io/
 
 jobs:
   build-image:
-    if: github.event_name == 'push' || (github.event.inputs.action != 'cleanup' && github.event.inputs.action != 'deploy-only')
+    if: github.event.inputs.action == 'build-and-deploy' || github.event.inputs.action == 'build-only'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -74,15 +74,15 @@ jobs:
           echo "${UKC_TOKEN}" > /tmp/ukc_token.txt
           unikraft login --token /tmp/ukc_token.txt --organization "${UKC_ORG}"
 
-      - name: Build & Push VLESS Unikraft image
+      - name: Build & Push x-tunnel Unikraft image
         run: |
           set -euo pipefail
-          cd vless
-          echo "=== Building Unikraft VLESS microkernel image ==="
-          unikraft image build . --output /tmp/vless.tar
+          cd x-tunnel
+          echo "=== Building Unikraft x-tunnel microkernel image ==="
+          unikraft image build . --output /tmp/x-tunnel.tar
           
           echo "=== Pushing image to Unikraft Cloud registry ==="
-          unikraft image copy /tmp/vless.tar "unikraft.io/${IMAGE_NAME}"
+          unikraft image copy /tmp/x-tunnel.tar "unikraft.io/${IMAGE_NAME}"
           echo "=== Build and push completed successfully! ==="
 
   deploy:
@@ -142,7 +142,7 @@ jobs:
           METRO: ${{ matrix.metro }}
           CHOSEN_IMAGE: ${{ env.IMAGE_NAME }}
           MEMORY: ${{ github.event.inputs.memory || '256MiB' }}
-          NODE_UUID: ${{ github.event.inputs.uuid || '694949f5-54c3-4113-b3c9-2d2518f770f4' }}
+          NODE_TOKEN: ${{ github.event.inputs.token || '694949f5-54c3-4113-b3c9-2d2518f770f4' }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
@@ -173,7 +173,7 @@ jobs:
           
           sleep 2
           
-          # 启动新微内核实例
+          # 启动新 x-tunnel 微内核实例
           RUN_RES=$(unikraft run \
             --name "${INSTANCE_NAME}" \
             --metro "${METRO}" \
@@ -183,7 +183,7 @@ jobs:
             --scale-to-zero "policy=on,cooldown-time=3600000" \
             -p 443:8080/http+tls \
             -p 80:8080/http \
-            --env UUID="${NODE_UUID}" \
+            --env TOKEN="${NODE_TOKEN}" \
             -o json 2>&1) || true
           
           echo "创建结果: ${RUN_RES}"
@@ -223,17 +223,13 @@ jobs:
           DEPLOY_STATUS="✅ ${STATUS} (HTTP ${HTTP_CODE})"
           echo "检测结果: ${DEPLOY_STATUS}"
           
-          # 生成标准 VLESS 链接
-          VLESS_LINK="vless://${NODE_UUID}@${FQDN}:443?encryption=none&security=tls&sni=${FQDN}&type=ws&host=${FQDN}&path=%2F#UKC-${METRO}"
-          echo "VLESS LINK: ${VLESS_LINK}"
-          
+          echo "FQDN_FINAL: ${FQDN}"
           echo "fqdn=${FQDN}" >> $GITHUB_OUTPUT
           echo "status=${DEPLOY_STATUS}" >> $GITHUB_OUTPUT
           echo "metro=${METRO}" >> $GITHUB_OUTPUT
-          echo "vless_link=${VLESS_LINK}" >> $GITHUB_OUTPUT
           
           if [ -n "${TG_BOT_TOKEN}" ] && [ -n "${TG_CHAT_ID}" ]; then
-            MESSAGE="🚀 UKC-${METRO} VLESS 部署完成\n\n域名: https://${FQDN}\n状态: ${DEPLOY_STATUS}\n\n节点链接:\n\`${VLESS_LINK}\`"
+            MESSAGE="🚀 UKC-${METRO} x-tunnel 部署完成\n\n域名: https://${FQDN}\n状态: ${DEPLOY_STATUS}"
             curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
               -H "Content-Type: application/json" \
               -d "{\"chat_id\":\"${TG_CHAT_ID}\",\"text\":\"${MESSAGE}\",\"parse_mode\":\"Markdown\"}" \
@@ -246,13 +242,8 @@ jobs:
           METRO="${{ steps.deploy.outputs.metro }}"
           FQDN="${{ steps.deploy.outputs.fqdn }}"
           STATUS="${{ steps.deploy.outputs.status }}"
-          VLESS="${{ steps.deploy.outputs.vless_link }}"
           
           echo "### 部署结果 (${METRO})" >> $GITHUB_STEP_SUMMARY
           echo "- **Metro**: ${METRO}" >> $GITHUB_STEP_SUMMARY
           echo "- **FQDN**: https://${FQDN}" >> $GITHUB_STEP_SUMMARY
           echo "- **状态**: ${STATUS}" >> $GITHUB_STEP_SUMMARY
-          echo "- **VLESS 节点链接**:" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`text" >> $GITHUB_STEP_SUMMARY
-          echo "${VLESS}" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
