@@ -5,12 +5,12 @@ on:
     branches:
       - main
     paths:
-      - 'x-tunnel/**'
+      - 'vless/**'
       - '.github/workflows/deploy.yml'
   workflow_dispatch:
     inputs:
       action:
-        description: '操作类型'
+        description: '操作'
         required: true
         default: 'deploy-only'
         type: choice
@@ -20,11 +20,11 @@ on:
           - build-only
           - cleanup
       metro:
-        description: '目标 metro（留空则部署全部 5 个节点：fra/was/dal/sin/sfo）'
+        description: '目标 metro（全空部署 5 节点：fra/was/dal/sin/sfo）'
         required: false
         default: ''
-      token:
-        description: 'x-tunnel 认证 Token'
+      uuid:
+        description: 'VLESS 节点 UUID'
         required: false
         default: '694949f5-54c3-4113-b3c9-2d2518f770f4'
       memory:
@@ -32,19 +32,20 @@ on:
         required: false
         default: '256MiB'
   schedule:
-    - cron: '0 1 * * *'  # 每天北京时间 09:00 自动健康保活与同步
+    - cron: '0 1 * * *'  # 每天北京时间 09:00 自动巡检保活
 
 permissions:
   contents: write
 
 env:
   UKC_ORG: xiaojieyu
-  IMAGE_NAME: xiaojieyu/x-tunnel:latest
+  IMAGE_NAME: xiaojieyu/vless:latest
   IMAGE_PREFIX: oci://unikraft.io/
+  CF_DOMAIN: blibli.kdns.fr
 
 jobs:
   build-image:
-    if: github.event.inputs.action == 'build-and-deploy' || github.event.inputs.action == 'build-only'
+    if: github.event_name == 'push' || github.event.inputs.action == 'build-and-deploy' || github.event.inputs.action == 'build-only'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -74,15 +75,15 @@ jobs:
           echo "${UKC_TOKEN}" > /tmp/ukc_token.txt
           unikraft login --token /tmp/ukc_token.txt --organization "${UKC_ORG}"
 
-      - name: Build & Push x-tunnel Unikraft image
+      - name: Build & Push VLESS Unikraft image
         run: |
           set -euo pipefail
-          cd x-tunnel
-          echo "=== Building Unikraft x-tunnel microkernel image ==="
-          unikraft image build . --output /tmp/x-tunnel.tar
+          cd vless
+          echo "=== Building Unikraft VLESS microkernel image ==="
+          unikraft image build . --output /tmp/vless.tar
           
           echo "=== Pushing image to Unikraft Cloud registry ==="
-          unikraft image copy /tmp/x-tunnel.tar "unikraft.io/${IMAGE_NAME}"
+          unikraft image copy /tmp/vless.tar "unikraft.io/${IMAGE_NAME}"
           echo "=== Build and push completed successfully! ==="
 
   deploy:
@@ -113,27 +114,6 @@ jobs:
         if: steps.filter.outputs.skip == 'false'
         uses: actions/checkout@v4
 
-      - name: Install unikraft CLI
-        if: steps.filter.outputs.skip == 'false'
-        run: |
-          set -euo pipefail
-          VERSION=$(curl -fsSL https://pkg.unikraft.com/endpoints/cli/content/stable.txt | tr -d '\r\n')
-          VERSION="${VERSION#v}"
-          echo "Installing unikraft CLI v${VERSION}"
-          curl -fsSL "https://github.com/unikraft-cloud/cli/releases/download/v${VERSION}/unikraft-cli_${VERSION}_linux_amd64.tar.gz" -o /tmp/unikraft.tar.gz
-          tar -xzf /tmp/unikraft.tar.gz -C /tmp
-          chmod +x /tmp/unikraft
-          echo "/tmp" >> $GITHUB_PATH
-
-      - name: Login to Unikraft
-        if: steps.filter.outputs.skip == 'false'
-        env:
-          UKC_TOKEN: ${{ secrets.UKC_TOKEN }}
-        run: |
-          set -euo pipefail
-          echo "${UKC_TOKEN}" > /tmp/ukc_token.txt
-          unikraft login --token /tmp/ukc_token.txt --organization "${UKC_ORG}"
-
       - name: Deploy to ${{ matrix.metro }}
         if: steps.filter.outputs.skip == 'false'
         id: deploy
@@ -142,94 +122,124 @@ jobs:
           METRO: ${{ matrix.metro }}
           CHOSEN_IMAGE: ${{ env.IMAGE_NAME }}
           MEMORY: ${{ github.event.inputs.memory || '256MiB' }}
-          NODE_TOKEN: ${{ github.event.inputs.token || '694949f5-54c3-4113-b3c9-2d2518f770f4' }}
+          NODE_UUID: ${{ github.event.inputs.uuid || '694949f5-54c3-4113-b3c9-2d2518f770f4' }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
+          set -euo pipefail
           INSTANCE_NAME="ukc-${METRO}"
           FULL_IMAGE="${IMAGE_PREFIX}${CHOSEN_IMAGE}"
           
           echo "==> 部署到 ${METRO}..."
           echo "    实例名: ${INSTANCE_NAME}"
           echo "    镜像: ${FULL_IMAGE}"
-          echo "    内存: ${MEMORY}"
+          echo "    UUID: ${NODE_UUID}"
           
-          # 检查并清理旧同名实例
+          # Python 脚本管理固定 SG 绑定与实例创建
           python3 -c "
-          import urllib.request, json
-          headers = {'Authorization': 'Bearer ${UKC_TOKEN}', 'Content-Type': 'application/json'}
-          try:
-              req = urllib.request.Request('https://api.${METRO}.unikraft.cloud/v1/instances', headers=headers)
-              with urllib.request.urlopen(req) as resp:
-                  data = json.loads(resp.read().decode('utf-8'))
-              for inst in data.get('data', {}).get('instances', []):
-                  if inst.get('name') == '${INSTANCE_NAME}':
-                      del_req = urllib.request.Request(f'https://api.${METRO}.unikraft.cloud/v1/instances/{inst[\"uuid\"]}', headers=headers, method='DELETE')
+          import urllib.request, json, time, os
+
+          metro = '${METRO}'
+          token = '${UKC_TOKEN}'
+          image = '${FULL_IMAGE}'
+          uuid = '${NODE_UUID}'
+          inst_name = '${INSTANCE_NAME}'
+          cf_domain = '${CF_DOMAIN}'
+
+          headers = {'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'}
+          
+          # 固定的 5 大 Metro 专属 Service Group 映射（与 Cloudflare CNAME 严格对应）
+          fixed_sgs = {
+              'fra': 'abb0096e-d2dd-481e-9113-55a1aeea6d4b',
+              'was': 'b8d75fb0-b870-4c94-9ff1-acd51453152f',
+              'dal': '9fc057a8-ff9a-4bcc-852a-0d440c0f0df9',
+              'sin': 'b35162a1-baf2-4dac-be88-3a3b5833f026',
+              'sfo': '5f6f8e56-5c3e-4895-b841-00b0dc58f85e'
+          }
+          target_sg = fixed_sgs.get(metro)
+
+          # 1. 检查现有实例
+          req = urllib.request.Request(f'https://api.{metro}.unikraft.cloud/v1/instances', headers=headers)
+          with urllib.request.urlopen(req) as resp:
+              data = json.loads(resp.read().decode('utf-8'))
+          instances = data.get('data', {}).get('instances', [])
+
+          current_valid_inst = None
+          for inst in instances:
+              sg_id = inst.get('service_group', {}).get('uuid', '')
+              if inst.get('name') == inst_name and sg_id == target_sg and inst.get('state') == 'running':
+                  current_valid_inst = inst
+              else:
+                  # 清理其它不匹配或孤立的实例
+                  try:
+                      del_req = urllib.request.Request(f'https://api.{metro}.unikraft.cloud/v1/instances/{inst[\"uuid\"]}', headers=headers, method='DELETE')
                       urllib.request.urlopen(del_req)
-                      print(f'已删除旧实例: {inst[\"uuid\"]}')
-          except Exception as e:
-              print(f'旧实例检查提示: {e}')
+                      print(f'已清理旧实例: {inst.get(\"name\")} ({inst.get(\"uuid\")})')
+                  except Exception as e:
+                      print(f'删除警告: {e}')
+
+          if not current_valid_inst:
+              time.sleep(1)
+              # 创建并启动新实例并绑定至目标 SG
+              body = {
+                  'name': inst_name,
+                  'image': image,
+                  'memory_mb': 256,
+                  'vcpus': 1,
+                  'service_group': {'uuid': target_sg},
+                  'env': {
+                      'UUID': uuid,
+                      'PORT': '8080'
+                  },
+                  'autostart': True
+              }
+              create_req = urllib.request.Request(
+                  f'https://api.{metro}.unikraft.cloud/v1/instances',
+                  data=json.dumps(body).encode('utf-8'),
+                  headers=headers,
+                  method='POST'
+              )
+              with urllib.request.urlopen(create_req) as resp:
+                  c_data = json.loads(resp.read().decode('utf-8'))
+                  new_uuid = c_data.get('data', {}).get('instances', [{}])[0].get('uuid')
+                  print(f'成功创建实例: {new_uuid}')
+              time.sleep(3)
+
+          # 获取该 SG 对应的 FQDN
+          sg_req = urllib.request.Request(f'https://api.{metro}.unikraft.cloud/v1/services/{target_sg}', headers=headers)
+          with urllib.request.urlopen(sg_req) as sg_resp:
+              sg_data = json.loads(sg_resp.read().decode('utf-8'))
+          fqdn = sg_data.get('data', {}).get('service_groups', [{}])[0].get('domains', [{}])[0].get('fqdn', '')
+          
+          cf_node = f'{metro}.{cf_domain}'
+          vless_link = f'vless://{uuid}@{cf_node}:443?encryption=none&security=tls&sni={cf_node}&type=ws&host={cf_node}&path=%2F#CF-{metro.upper()}'
+
+          with open('/tmp/deploy_out.json', 'w') as f:
+              json.dump({'fqdn': fqdn, 'cf_node': cf_node, 'vless': vless_link}, f)
           "
           
-          sleep 2
+          FQDN=$(jq -r '.fqdn' /tmp/deploy_out.json)
+          CF_NODE=$(jq -r '.cf_node' /tmp/deploy_out.json)
+          VLESS_LINK=$(jq -r '.vless' /tmp/deploy_out.json)
           
-          # 启动新 x-tunnel 微内核实例
-          RUN_RES=$(unikraft run \
-            --name "${INSTANCE_NAME}" \
-            --metro "${METRO}" \
-            --image "${FULL_IMAGE}" \
-            --memory "${MEMORY}" \
-            --vcpus 1 \
-            --scale-to-zero "policy=on,cooldown-time=3600000" \
-            -p 443:8080/http+tls \
-            -p 80:8080/http \
-            --env TOKEN="${NODE_TOKEN}" \
-            -o json 2>&1) || true
-          
-          echo "创建结果: ${RUN_RES}"
-          
-          sleep 5
-          
-          # 获取实例状态与域名
-          INFO_JSON=$(python3 -c "
-          import urllib.request, json
-          headers = {'Authorization': 'Bearer ${UKC_TOKEN}'}
-          try:
-              req = urllib.request.Request('https://api.${METRO}.unikraft.cloud/v1/instances', headers=headers)
-              with urllib.request.urlopen(req) as resp:
-                  data = json.loads(resp.read().decode('utf-8'))
-              for inst in data.get('data', {}).get('instances', []):
-                  if inst.get('name') == '${INSTANCE_NAME}':
-                      sg_uuid = inst.get('service_group', {}).get('uuid', '')
-                      sg_req = urllib.request.Request(f'https://api.${METRO}.unikraft.cloud/v1/services/{sg_uuid}', headers=headers)
-                      with urllib.request.urlopen(sg_req) as sg_resp:
-                          sg_data = json.loads(sg_resp.read().decode('utf-8'))
-                      fqdn = sg_data.get('data', {}).get('service_groups', [{}])[0].get('domains', [{}])[0].get('fqdn', '')
-                      print(json.dumps({'state': inst.get('state', 'unknown'), 'fqdn': fqdn}))
-                      break
-          except Exception as e:
-              print(json.dumps({'state': 'error', 'fqdn': '', 'err': str(e)}))
-          ")
-          
-          STATUS=$(echo "${INFO_JSON}" | jq -r '.state // "unknown"')
-          FQDN=$(echo "${INFO_JSON}" | jq -r '.fqdn // "unknown"')
-          
-          echo "状态: ${STATUS}"
           echo "FQDN: ${FQDN}"
+          echo "CF_NODE: ${CF_NODE}"
+          echo "VLESS: ${VLESS_LINK}"
           
-          # 冒烟测试探活
-          echo "==> 冒烟测试探活..."
-          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 10 "https://${FQDN}/health" 2>/dev/null || echo "000")
-          DEPLOY_STATUS="✅ ${STATUS} (HTTP ${HTTP_CODE})"
-          echo "检测结果: ${DEPLOY_STATUS}"
+          echo "==> 健康检查..."
+          ORIGIN_HTTP=$(curl -s -o /dev/null -w "%{http_code}" -m 10 "https://${FQDN}/health" 2>/dev/null || echo "000")
+          CF_HTTP=$(curl -s -o /dev/null -w "%{http_code}" -m 10 "https://${CF_NODE}/health" 2>/dev/null || echo "000")
+          STATUS="源站: HTTP ${ORIGIN_HTTP} | CF CDN: HTTP ${CF_HTTP}"
+          echo "检测结果: ${STATUS}"
           
-          echo "FQDN_FINAL: ${FQDN}"
           echo "fqdn=${FQDN}" >> $GITHUB_OUTPUT
-          echo "status=${DEPLOY_STATUS}" >> $GITHUB_OUTPUT
+          echo "cf_node=${CF_NODE}" >> $GITHUB_OUTPUT
+          echo "status=${STATUS}" >> $GITHUB_OUTPUT
           echo "metro=${METRO}" >> $GITHUB_OUTPUT
+          echo "vless=${VLESS_LINK}" >> $GITHUB_OUTPUT
           
           if [ -n "${TG_BOT_TOKEN}" ] && [ -n "${TG_CHAT_ID}" ]; then
-            MESSAGE="🚀 UKC-${METRO} x-tunnel 部署完成\n\n域名: https://${FQDN}\n状态: ${DEPLOY_STATUS}"
+            MESSAGE="🚀 UKC-${METRO} VLESS 节点就绪\n\nCDN 加速域名: ${CF_NODE}\n源站域名: ${FQDN}\n状态: ${STATUS}\n\n链接: \`${VLESS_LINK}\`"
             curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
               -H "Content-Type: application/json" \
               -d "{\"chat_id\":\"${TG_CHAT_ID}\",\"text\":\"${MESSAGE}\",\"parse_mode\":\"Markdown\"}" \
@@ -241,9 +251,13 @@ jobs:
         run: |
           METRO="${{ steps.deploy.outputs.metro }}"
           FQDN="${{ steps.deploy.outputs.fqdn }}"
+          CF_NODE="${{ steps.deploy.outputs.cf_node }}"
           STATUS="${{ steps.deploy.outputs.status }}"
+          VLESS="${{ steps.deploy.outputs.vless }}"
           
-          echo "### 部署结果 (${METRO})" >> $GITHUB_STEP_SUMMARY
+          echo "### 节点部署结果 (${METRO})" >> $GITHUB_STEP_SUMMARY
           echo "- **Metro**: ${METRO}" >> $GITHUB_STEP_SUMMARY
-          echo "- **FQDN**: https://${FQDN}" >> $GITHUB_STEP_SUMMARY
-          echo "- **状态**: ${STATUS}" >> $GITHUB_STEP_SUMMARY
+          echo "- **CDN 加速域名**: \`${CF_NODE}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Unikraft 源站**: https://${FQDN}" >> $GITHUB_STEP_SUMMARY
+          echo "- **检测状态**: ${STATUS}" >> $GITHUB_STEP_SUMMARY
+          echo "- **VLESS 链接**: \`${VLESS}\`" >> $GITHUB_STEP_SUMMARY
