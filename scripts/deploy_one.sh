@@ -1,11 +1,11 @@
 #!/bin/bash
 # UKC Deploy Script
-# 从 bh-scripts 仓库拉取核心脚本并执行部署
+# �?bh-scripts 仓库拉取核心脚本并执行部�?
 
 set -euo pipefail
 
 METRO="${1:-}"
-IMAGE="${2:-lxy/xapp-go}"
+IMAGE="${2:-xiaojieyu/x-tunnel:latest}"
 MEMORY="${3:-256Mi}"
 ORG="${4:-xiaojieyu}"
 
@@ -18,8 +18,8 @@ fi
 INSTANCE_NAME="ukc-${METRO}"
 FULL_IMAGE="oci://unikraft.io/${IMAGE}"
 
-echo "==> 部署到 ${METRO}..."
-echo "    实例名: ${INSTANCE_NAME}"
+echo "==> 部署�?${METRO}..."
+echo "    实例�? ${INSTANCE_NAME}"
 echo "    镜像: ${FULL_IMAGE}"
 echo "    内存: ${MEMORY}"
 echo "    组织: ${ORG}"
@@ -44,7 +44,7 @@ _timeout=300
 _count=0
 while [ $_count -lt $_timeout ]; do
     STATUS=$(unikraft instance get "${INSTANCE_NAME}" -o json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('state', 'unknown'))" 2>/dev/null || echo "error")
-    echo "[$_count/$\timeout] 状态: ${STATUS}"
+    echo "[$_count/$\timeout] 状�? ${STATUS}"
     if [ "${STATUS}" = "running" ]; then
         break
     fi
@@ -53,7 +53,7 @@ while [ $_count -lt $_timeout ]; do
 done
 
 if [ "${STATUS}" != "running" ]; then
-    echo "错误: 实例未进入 running 状态，最后状态: ${STATUS}"
+    echo "错误: 实例未进�?running 状态，最后状�? ${STATUS}"
     exit 1
 fi
 
@@ -65,15 +65,15 @@ echo "FQDN: ${FQDN}"
 echo "==> 冒烟测试..."
 HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 15 "https://${FQDN}" 2>/dev/null || echo "000")
 if [ "${HTTP_CODE}" = "200" ] || [ "${HTTP_CODE}" = "301" ] || [ "${HTTP_CODE}" = "302" ]; then
-    STATUS="✅ running"
+    STATUS="�?running"
 else
     STATUS="⚠️ unreachable (HTTP ${HTTP_CODE})"
 fi
-echo "状态: ${STATUS}"
+echo "状�? ${STATUS}"
 
 # 输出结果
 echo ""
 echo "==> 完成"
 echo "实例: ${INSTANCE_NAME}"
 echo "FQDN: https://${FQDN}"
-echo "状态: ${STATUS}"
+echo "状�? ${STATUS}"

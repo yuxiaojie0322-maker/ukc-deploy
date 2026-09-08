@@ -1,32 +1,36 @@
-name: ukc-deploy
+﻿name: ukc-deploy
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'x-tunnel/**'
+      - '.github/workflows/deploy.yml'
   workflow_dispatch:
     inputs:
+      action:
+        description: '操作类型'
+        required: true
+        default: 'build-and-deploy'
+        type: choice
+        options:
+          - build-and-deploy
+          - deploy-only
+          - build-only
+          - cleanup
       metro:
-        description: '目标 metro（留空则部署全部 5 个节点，或输入单个如 fra/was/dal/sin/sfo）'
+        description: '目标 metro（留空则部署全部 5 个节点：fra/was/dal/sin/sfo）'
         required: false
         default: ''
+      token:
+        description: 'x-tunnel 认证 Token'
+        required: false
+        default: '694949f5-54c3-4113-b3c9-2d2518f770f4'
       memory:
         description: '每个实例内存配额 (如 256MiB, 512MiB)'
         required: false
         default: '256MiB'
-      image:
-        description: '镜像名称（默认专属独立镜像 xiaojieyu/vless:latest）'
-        required: false
-        default: 'xiaojieyu/vless:latest'
-      uuid:
-        description: 'VLESS 节点 UUID 密钥'
-        required: false
-        default: '694949f5-54c3-4113-b3c9-2d2518f770f4'
-      action:
-        description: '操作类型'
-        required: false
-        default: 'deploy'
-        type: choice
-        options:
-          - deploy
-          - cleanup
   schedule:
     - cron: '0 1 * * *'  # 每天北京时间 09:00 自动健康保活与同步
 
@@ -35,11 +39,60 @@ permissions:
 
 env:
   UKC_ORG: xiaojieyu
+  IMAGE_NAME: xiaojieyu/x-tunnel:latest
   IMAGE_PREFIX: oci://unikraft.io/
 
 jobs:
+  build-image:
+    if: github.event_name == 'push' || (github.event.inputs.action != 'cleanup' && github.event.inputs.action != 'deploy-only')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Install unikraft CLI
+        run: |
+          set -euo pipefail
+          VERSION=$(curl -fsSL https://pkg.unikraft.com/endpoints/cli/content/stable.txt | tr -d '\r\n')
+          VERSION="${VERSION#v}"
+          echo "Installing unikraft CLI v${VERSION}"
+          curl -fsSL "https://github.com/unikraft-cloud/cli/releases/download/v${VERSION}/unikraft-cli_${VERSION}_linux_amd64.tar.gz" -o /tmp/unikraft.tar.gz
+          tar -xzf /tmp/unikraft.tar.gz -C /tmp
+          chmod +x /tmp/unikraft
+          echo "/tmp" >> $GITHUB_PATH
+
+      - name: Login to Unikraft
+        env:
+          UKC_TOKEN: ${{ secrets.UKC_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "${UKC_TOKEN}" > /tmp/ukc_token.txt
+          unikraft login --token /tmp/ukc_token.txt --organization "${UKC_ORG}"
+
+      - name: Build & Push x-tunnel Unikraft image
+        run: |
+          set -euo pipefail
+          cd x-tunnel
+          echo "=== Building Unikraft microkernel image ==="
+          unikraft image build . --output /tmp/x-tunnel.tar
+          
+          echo "=== Pushing image to Unikraft Cloud registry ==="
+          unikraft image copy /tmp/x-tunnel.tar "unikraft.io/${IMAGE_NAME}"
+          echo "=== Build and push completed successfully! ==="
+
   deploy:
-    if: github.event.inputs.action != 'cleanup'
+    if: github.event.inputs.action != 'cleanup' && github.event.inputs.action != 'build-only'
+    needs: [build-image]
+    if: |
+      always() &&
+      (needs.build-image.result == 'success' || needs.build-image.result == 'skipped') &&
+      github.event.inputs.action != 'cleanup' &&
+      github.event.inputs.action != 'build-only'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -88,9 +141,9 @@ jobs:
         env:
           UKC_TOKEN: ${{ secrets.UKC_TOKEN }}
           METRO: ${{ matrix.metro }}
-          CHOSEN_IMAGE: ${{ github.event.inputs.image || 'xiaojieyu/vless:latest' }}
+          CHOSEN_IMAGE: ${{ env.IMAGE_NAME }}
           MEMORY: ${{ github.event.inputs.memory || '256MiB' }}
-          NODE_UUID: ${{ github.event.inputs.uuid || '694949f5-54c3-4113-b3c9-2d2518f770f4' }}
+          NODE_TOKEN: ${{ github.event.inputs.token || '694949f5-54c3-4113-b3c9-2d2518f770f4' }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
@@ -121,7 +174,7 @@ jobs:
           
           sleep 2
           
-          # 创建服务组并启动新实例
+          # 启动新微内核实例
           RUN_RES=$(unikraft run \
             --name "${INSTANCE_NAME}" \
             --metro "${METRO}" \
@@ -131,6 +184,7 @@ jobs:
             --scale-to-zero "policy=on,cooldown-time=3600000" \
             -p 443:8080/http+tls \
             -p 80:8080/http \
+            --env TOKEN="${NODE_TOKEN}" \
             -o json 2>&1) || true
           
           echo "创建结果: ${RUN_RES}"
@@ -164,22 +218,22 @@ jobs:
           echo "状态: ${STATUS}"
           echo "FQDN: ${FQDN}"
           
-          # 冒烟测试
-          echo "==> 冒烟测试..."
+          # 冒烟测试探活
+          echo "==> 冒烟测试探活..."
           HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 10 "https://${FQDN}/health" 2>/dev/null || echo "000")
           DEPLOY_STATUS="✅ ${STATUS} (HTTP ${HTTP_CODE})"
           echo "检测结果: ${DEPLOY_STATUS}"
           
-          VLESS_LINK="vless://${NODE_UUID}@${FQDN}:443?encryption=none&security=tls&sni=${FQDN}&type=ws&host=${FQDN}&path=%2F#UKC-${METRO}"
-          echo "VLESS: ${VLESS_LINK}"
+          CLIENT_CMD=".\\x-tunnel-windows-amd64.exe -l socks5://127.0.0.1:1080 -f wss://${FQDN}:443/ -token \"${NODE_TOKEN}\" -ip \"优选IP/域名列表\""
+          echo "Client CMD: ${CLIENT_CMD}"
           
           echo "fqdn=${FQDN}" >> $GITHUB_OUTPUT
           echo "status=${DEPLOY_STATUS}" >> $GITHUB_OUTPUT
           echo "metro=${METRO}" >> $GITHUB_OUTPUT
-          echo "vless_link=${VLESS_LINK}" >> $GITHUB_OUTPUT
+          echo "client_cmd=${CLIENT_CMD}" >> $GITHUB_OUTPUT
           
           if [ -n "${TG_BOT_TOKEN}" ] && [ -n "${TG_CHAT_ID}" ]; then
-            MESSAGE="🚀 UKC-${METRO} 部署完成\n\n域名: https://${FQDN}\n状态: ${DEPLOY_STATUS}\n\n链接: \`${VLESS_LINK}\`"
+            MESSAGE="🚀 UKC-${METRO} x-tunnel 部署完成\n\n域名: https://${FQDN}\n状态: ${DEPLOY_STATUS}\n\n客户端连接命令:\n\`${CLIENT_CMD}\`"
             curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
               -H "Content-Type: application/json" \
               -d "{\"chat_id\":\"${TG_CHAT_ID}\",\"text\":\"${MESSAGE}\",\"parse_mode\":\"Markdown\"}" \
@@ -192,13 +246,16 @@ jobs:
           METRO="${{ steps.deploy.outputs.metro }}"
           FQDN="${{ steps.deploy.outputs.fqdn }}"
           STATUS="${{ steps.deploy.outputs.status }}"
-          VLESS="${{ steps.deploy.outputs.vless_link }}"
+          CMD="${{ steps.deploy.outputs.client_cmd }}"
           
           echo "### 部署结果 (${METRO})" >> $GITHUB_STEP_SUMMARY
           echo "- **Metro**: ${METRO}" >> $GITHUB_STEP_SUMMARY
           echo "- **FQDN**: https://${FQDN}" >> $GITHUB_STEP_SUMMARY
           echo "- **状态**: ${STATUS}" >> $GITHUB_STEP_SUMMARY
-          echo "- **VLESS 链接**: \`${VLESS}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Windows 客户端连接命令**:" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`powershell" >> $GITHUB_STEP_SUMMARY
+          echo "${CMD}" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
 
   cleanup:
     if: github.event.inputs.action == 'cleanup'
@@ -220,7 +277,7 @@ jobs:
                       uuid = inst.get('uuid')
                       del_req = urllib.request.Request(f'https://api.{m}.unikraft.cloud/v1/instances/{uuid}', headers=headers, method='DELETE')
                       urllib.request.urlopen(del_req)
-                      print(f'已删除 [{m}] 实例: {inst.get(\"name\")} ({uuid})')
+                      print(f'已删除[{m}] 实例: {inst.get(\"name\")} ({uuid})')
               except Exception as e:
                   print(f'[{m}] 错误: {e}')
           "

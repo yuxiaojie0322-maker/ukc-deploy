@@ -1,66 +1,26 @@
-# Unikraft Cloud 多区域部署
+﻿# Unikraft Cloud 多区域部署 (x-tunnel 微内核版)
 
-自动化部署应用到 Unikraft Cloud 的 5 个 metro：`fra` / `was` / `dal` / `sin` / `sfo`
+自动化部署 x-tunnel (带 smux 多路复用) 到 Unikraft Cloud 的 5 个区域：`fra` / `was` / `dal` / `sin` / `sfo`。
+
+## 特性
+- **全自动 CI/CD 构建**：GitHub Actions 自动编译 Go 源码为极小 unikernel 镜像并推送到 Unikraft 官方仓库。
+- **5 大区域多活**：自动分发部署到全球 5 个节点。
+- **多路复用加速**：支持 smux 多路复用，搭配 Windows 客户端优选 IP/域名极速连接。
 
 ## 快速开始
 
-### 1. 获取 API Token
+### 1. 配置 GitHub Secrets
+在仓库 `Settings` -> `Secrets and variables` -> `Actions` 中添加：
+- `UKC_TOKEN`: Unikraft Cloud API Token (在 console.unikraft.cloud 获取)
+- `TG_BOT_TOKEN` *(可选)*: Telegram Bot Token
+- `TG_CHAT_ID` *(可选)*: Telegram 接收通知的用户/群组 ID
 
-1. 登录 [unikraft.cloud](https://unikraft.cloud)
-2. 打开浏览器 DevTools → Application → Cookies → `console.unikraft.cloud`
-3. 复制 `ukc_auth` 的值
+### 2. 触发部署
+- **自动触发**：推送代码到 `main` 分支自动编译并部署。
+- **手动触发**：在 GitHub 的 `Actions` 标签页，选择 `ukc-deploy` -> `Run workflow`，操作选择 `build-and-deploy` 即可。
 
-### 2. 配置 GitHub Secrets
-
-在 repo → Settings → Secrets and variables → Actions 添加：
-
-| Secret | 说明 | 示例 |
-|--------|------|------|
-| `UKC_TOKEN` | Unikraft API token | `MTc4ODc2...` |
-| `TG_BOT_TOKEN` | Telegram Bot Token | `123456:ABC-DEF...` |
-| `TG_CHAT_ID` | Telegram Chat ID | `123456789` |
-
-### 3. 触发部署
-
-- **手动**：Actions tab → `ukc-deploy` → Run workflow
-- **定时**：每天北京时间 09:00 自动执行
-
-## 部署配置
-
-### 默认镜像（建议直接可用）
-
-| Metro | 镜像 | 语言 | 现有实例名 |
-|-------|------|------|-----------|
-| sin | lxy/xapp-python | Python | xapp-sin |
-| was | lxy/xapp-java | Java | edge-was-jm44f0 |
-| sfo | lxy/xapp-java | Java | node-sfo-jv91bd |
-| dal | lxy/xapp-js | JavaScript | relay-dal-js7c2e |
-| fra | lxy/xapp-go | Go | svc-fra-pyf3a9 |
-
-### 手动触发参数
-
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `metro` | 全部5个 | 指定单个 metro 部署，或留空全部部署 |
-| `image` | `lxy/xapp-go` | 镜像名称（不含前缀） |
-| `memory` | `256Mi` | 内存配额 |
-
-## 资源规格
-
-- 每个实例：`1 vCPU` / `128MiB` 内存
-- 启用 `scale-to-zero`（零请求时自动休眠）
-- 冷却时间：1000ms
-- 暴露端口：`443:8080/http+tls` + `80:8080/http`
-
-## 访问地址
-
-部署成功后每个实例获得 `*.run.unikraft.cloud` 域名：
-- `https://ukc-fra-xxxx.run.unikraft.cloud`
-- `https://ukc-sin-xxxx.run.unikraft.cloud`
-
-## Telegram 推送
-
-每次部署推送消息到指定 Chat ID，包含：
-- 每个 metro 的部署状态
-- 实例 FQDN
-- 冒烟测试结果
+### 3. Windows 客户端连接
+部署完成后，GitHub Actions 摘要会显示各节点的 FQDN 域名，使用本地 `x-tunnel-windows-amd64.exe`：
+```powershell
+.\x-tunnel-windows-amd64.exe -l socks5://127.0.0.1:1080 -f wss://<节点域名>:443/ -token "694949f5-54c3-4113-b3c9-2d2518f770f4" -ip "优选IP/域名列表"
+```
