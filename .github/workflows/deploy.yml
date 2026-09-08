@@ -86,7 +86,6 @@ jobs:
           echo "=== Build and push completed successfully! ==="
 
   deploy:
-    if: github.event.inputs.action != 'cleanup' && github.event.inputs.action != 'build-only'
     needs: [build-image]
     if: |
       always() &&
