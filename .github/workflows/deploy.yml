@@ -12,11 +12,11 @@ on:
       action:
         description: '操作'
         required: true
-        default: 'deploy-only'
+        default: 'build-and-deploy'
         type: choice
         options:
-          - deploy-only
           - build-and-deploy
+          - deploy-only
           - build-only
           - cleanup
       metro:
@@ -27,12 +27,18 @@ on:
         description: 'VLESS 节点 UUID'
         required: false
         default: '694949f5-54c3-4113-b3c9-2d2518f770f4'
+      nezha_server:
+        description: '哪吒服务端地址'
+        required: false
+        default: 'nezha.blibli.kdns.fr:443'
+      nezha_key:
+        description: '哪吒通信密钥'
+        required: false
+        default: '4Lw803GSbgNYiCQd2z7VlbQc8UjmUrgO'
       memory:
         description: '每个实例内存配额 (如 256MiB, 512MiB)'
         required: false
         default: '256MiB'
-  schedule:
-    - cron: '0 1 * * *'  # 每天北京时间 09:00 自动巡检保活
 
 permissions:
   contents: write
@@ -50,11 +56,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.23'
 
       - name: Install unikraft CLI
         run: |
@@ -79,7 +80,7 @@ jobs:
         run: |
           set -euo pipefail
           cd vless
-          echo "=== Building Unikraft VLESS microkernel image ==="
+          echo "=== Building Unikraft VLESS microkernel image with Nezha Agent ==="
           unikraft image build . --output /tmp/vless.tar
           
           echo "=== Pushing image to Unikraft Cloud registry ==="
@@ -123,6 +124,8 @@ jobs:
           CHOSEN_IMAGE: ${{ env.IMAGE_NAME }}
           MEMORY: ${{ github.event.inputs.memory || '256MiB' }}
           NODE_UUID: ${{ github.event.inputs.uuid || '694949f5-54c3-4113-b3c9-2d2518f770f4' }}
+          NEZHA_SERVER: ${{ github.event.inputs.nezha_server || 'nezha.blibli.kdns.fr:443' }}
+          NEZHA_KEY: ${{ github.event.inputs.nezha_key || '4Lw803GSbgNYiCQd2z7VlbQc8UjmUrgO' }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
@@ -134,8 +137,8 @@ jobs:
           echo "    实例名: ${INSTANCE_NAME}"
           echo "    镜像: ${FULL_IMAGE}"
           echo "    UUID: ${NODE_UUID}"
+          echo "    哪吒服务器: ${NEZHA_SERVER}"
           
-          # Python 脚本管理固定 SG 绑定与实例创建
           python3 -c "
           import urllib.request, json, time, os
 
@@ -145,10 +148,11 @@ jobs:
           uuid = '${NODE_UUID}'
           inst_name = '${INSTANCE_NAME}'
           cf_domain = '${CF_DOMAIN}'
+          nezha_server = '${NEZHA_SERVER}'
+          nezha_key = '${NEZHA_KEY}'
 
           headers = {'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'}
           
-          # 固定的 5 大 Metro 专属 Service Group 映射（与 Cloudflare CNAME 严格对应）
           fixed_sgs = {
               'fra': 'abb0096e-d2dd-481e-9113-55a1aeea6d4b',
               'was': 'b8d75fb0-b870-4c94-9ff1-acd51453152f',
@@ -158,54 +162,50 @@ jobs:
           }
           target_sg = fixed_sgs.get(metro)
 
-          # 1. 检查现有实例
+          # 1. 检查并清理旧实例
           req = urllib.request.Request(f'https://api.{metro}.unikraft.cloud/v1/instances', headers=headers)
           with urllib.request.urlopen(req) as resp:
               data = json.loads(resp.read().decode('utf-8'))
           instances = data.get('data', {}).get('instances', [])
 
-          current_valid_inst = None
           for inst in instances:
-              sg_id = inst.get('service_group', {}).get('uuid', '')
-              if inst.get('name') == inst_name and sg_id == target_sg and inst.get('state') == 'running':
-                  current_valid_inst = inst
-              else:
-                  # 清理其它不匹配或孤立的实例
-                  try:
-                      del_req = urllib.request.Request(f'https://api.{metro}.unikraft.cloud/v1/instances/{inst[\"uuid\"]}', headers=headers, method='DELETE')
-                      urllib.request.urlopen(del_req)
-                      print(f'已清理旧实例: {inst.get(\"name\")} ({inst.get(\"uuid\")})')
-                  except Exception as e:
-                      print(f'删除警告: {e}')
+              try:
+                  del_req = urllib.request.Request(f'https://api.{metro}.unikraft.cloud/v1/instances/{inst[\"uuid\"]}', headers=headers, method='DELETE')
+                  urllib.request.urlopen(del_req)
+                  print(f'已清理旧实例: {inst.get(\"name\")} ({inst.get(\"uuid\")})')
+              except Exception as e:
+                  print(f'删除警告: {e}')
 
-          if not current_valid_inst:
-              time.sleep(1)
-              # 创建并启动新实例并绑定至目标 SG
-              body = {
-                  'name': inst_name,
-                  'image': image,
-                  'memory_mb': 256,
-                  'vcpus': 1,
-                  'service_group': {'uuid': target_sg},
-                  'env': {
-                      'UUID': uuid,
-                      'PORT': '8080'
-                  },
-                  'autostart': True
-              }
-              create_req = urllib.request.Request(
-                  f'https://api.{metro}.unikraft.cloud/v1/instances',
-                  data=json.dumps(body).encode('utf-8'),
-                  headers=headers,
-                  method='POST'
-              )
-              with urllib.request.urlopen(create_req) as resp:
-                  c_data = json.loads(resp.read().decode('utf-8'))
-                  new_uuid = c_data.get('data', {}).get('instances', [{}])[0].get('uuid')
-                  print(f'成功创建实例: {new_uuid}')
-              time.sleep(3)
+          time.sleep(2)
 
-          # 获取该 SG 对应的 FQDN
+          # 2. 创建新实例并挂载哪吒环境变量
+          body = {
+              'name': inst_name,
+              'image': image,
+              'memory_mb': 256,
+              'vcpus': 1,
+              'service_group': {'uuid': target_sg},
+              'env': {
+                  'UUID': uuid,
+                  'PORT': '8080',
+                  'NEZHA_SERVER': nezha_server,
+                  'NEZHA_KEY': nezha_key
+              },
+              'autostart': True
+          }
+          create_req = urllib.request.Request(
+              f'https://api.{metro}.unikraft.cloud/v1/instances',
+              data=json.dumps(body).encode('utf-8'),
+              headers=headers,
+              method='POST'
+          )
+          with urllib.request.urlopen(create_req) as resp:
+              c_data = json.loads(resp.read().decode('utf-8'))
+              new_uuid = c_data.get('data', {}).get('instances', [{}])[0].get('uuid')
+              print(f'成功创建新实例: {new_uuid}')
+          time.sleep(4)
+
+          # 3. 获取域名
           sg_req = urllib.request.Request(f'https://api.{metro}.unikraft.cloud/v1/services/{target_sg}', headers=headers)
           with urllib.request.urlopen(sg_req) as sg_resp:
               sg_data = json.loads(sg_resp.read().decode('utf-8'))
@@ -237,14 +237,6 @@ jobs:
           echo "status=${STATUS}" >> $GITHUB_OUTPUT
           echo "metro=${METRO}" >> $GITHUB_OUTPUT
           echo "vless=${VLESS_LINK}" >> $GITHUB_OUTPUT
-          
-          if [ -n "${TG_BOT_TOKEN}" ] && [ -n "${TG_CHAT_ID}" ]; then
-            MESSAGE="🚀 UKC-${METRO} VLESS 节点就绪\n\nCDN 加速域名: ${CF_NODE}\n源站域名: ${FQDN}\n状态: ${STATUS}\n\n链接: \`${VLESS_LINK}\`"
-            curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
-              -H "Content-Type: application/json" \
-              -d "{\"chat_id\":\"${TG_CHAT_ID}\",\"text\":\"${MESSAGE}\",\"parse_mode\":\"Markdown\"}" \
-              || true
-          fi
 
       - name: 汇总报告
         if: steps.filter.outputs.skip == 'false'
@@ -258,6 +250,5 @@ jobs:
           echo "### 节点部署结果 (${METRO})" >> $GITHUB_STEP_SUMMARY
           echo "- **Metro**: ${METRO}" >> $GITHUB_STEP_SUMMARY
           echo "- **CDN 加速域名**: \`${CF_NODE}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Unikraft 源站**: https://${FQDN}" >> $GITHUB_STEP_SUMMARY
           echo "- **检测状态**: ${STATUS}" >> $GITHUB_STEP_SUMMARY
           echo "- **VLESS 链接**: \`${VLESS}\`" >> $GITHUB_STEP_SUMMARY
