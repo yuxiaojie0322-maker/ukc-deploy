@@ -1,5 +1,7 @@
-spec: v0.6
+spec: v0.7
 name: vless
-runtime: base:latest
-rootfs: ./Dockerfile
-cmd: ["/server"]
+runtime: base-compat:latest
+rootfs:
+  format: erofs
+  source: ./Dockerfile
+cmd: ["/entrypoint.sh"]
