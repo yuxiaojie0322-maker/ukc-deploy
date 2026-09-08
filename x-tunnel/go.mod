@@ -1,4 +1,4 @@
-﻿module x-tunnel
+module x-tunnel
 
 go 1.23
 
